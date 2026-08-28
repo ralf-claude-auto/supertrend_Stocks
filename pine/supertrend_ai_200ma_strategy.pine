@@ -1,0 +1,215 @@
+//@version=6
+// SuperTrend AI + 200 SMA Trend Filter — Backtest Strategy
+//
+// Strategy logic (daily timeframe):
+//   BUY  : SuperTrend AI flips bullish (cross up) while close > 200-day SMA
+//   SELL : SuperTrend AI flips bearish (cross down)
+//
+// The SuperTrend AI here is a re-implementation of the k-means clustering
+// concept popularized by LuxAlgo's open-source "SuperTrend AI (Clustering)"
+// indicator: multiple SuperTrends with different factors are evaluated on
+// their recent performance, clustered with k-means, and the factor of the
+// selected cluster drives the live SuperTrend.
+//
+// Usage: paste into the Pine Editor, add to a DAILY chart, open the
+// Strategy Tester, then step through your watchlist symbol by symbol.
+
+strategy("SuperTrend AI + 200 MA [Daily]",
+     overlay = true,
+     initial_capital = 100000,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 100,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.1,
+     process_orders_on_close = true,
+     calc_on_every_tick = false,
+     max_labels_count = 500)
+
+//---------------------------------------------------------------------
+// Inputs
+//---------------------------------------------------------------------
+grpST  = "SuperTrend AI"
+length     = input.int(10,  "ATR Length",        minval = 1,               group = grpST)
+minMult    = input.int(1,   "Factor Range Min",  minval = 0,               group = grpST)
+maxMult    = input.int(5,   "Factor Range Max",  minval = 0,               group = grpST)
+step       = input.float(0.5, "Factor Step",     minval = 0.1, step = 0.1, group = grpST)
+perfAlpha  = input.float(10, "Performance Memory", minval = 2,             group = grpST)
+fromCluster = input.string("Best", "From Cluster", options = ["Best", "Average", "Worst"], group = grpST)
+maxIter    = input.int(1000, "Max K-means Iterations", minval = 1,         group = grpST)
+maxData    = input.int(10000, "Max Historical Bars for Calculation", minval = 100, group = grpST)
+minStrength = input.int(0, "Minimum Signal Strength (0-9, 0 = off)", minval = 0, maxval = 9, group = grpST)
+
+grpMA  = "Trend Filter"
+maLen      = input.int(200, "SMA Length", minval = 1,                      group = grpMA)
+exitBelowMa = input.bool(false, "Also exit when close drops below SMA",    group = grpMA)
+
+grpBT  = "Backtest Window"
+startDate  = input.time(timestamp("1 Jan 2015"), "Start Date",             group = grpBT)
+endDate    = input.time(timestamp("1 Jan 2099"), "End Date",               group = grpBT)
+
+if minMult > maxMult
+    runtime.error("Factor Range Min must be <= Factor Range Max")
+
+//---------------------------------------------------------------------
+// SuperTrend bank: one SuperTrend per factor, each tracking its own
+// performance score (exponentially weighted directional P&L)
+//---------------------------------------------------------------------
+type st
+    float upper = na
+    float lower = na
+    float output = na
+    float perf = 0.
+    float factor = na
+    int   trend = 0
+
+var holder  = array.new<st>(0)
+var factors = array.new<float>(0)
+
+// Populate the factor bank once
+if barstate.isfirst
+    for i = 0 to int((maxMult - minMult) / step)
+        f = minMult + i * step
+        factors.push(f)
+        holder.push(st.new(factor = f))
+
+atr = ta.atr(length)
+
+// Update each SuperTrend in the bank
+for element in holder
+    up = hl2 + atr * element.factor
+    dn = hl2 - atr * element.factor
+    element.trend  := close > element.upper ? 1 : close < element.lower ? 0 : element.trend
+    element.upper  := close[1] < element.upper ? math.min(up, element.upper) : up
+    element.lower  := close[1] > element.lower ? math.max(dn, element.lower) : dn
+    diff = nz(math.sign(close[1] - element.output))
+    element.perf   += 2 / (perfAlpha + 1) * (nz(close - close[1]) * diff - element.perf)
+    element.output := element.trend == 1 ? element.lower : element.upper
+
+//---------------------------------------------------------------------
+// K-means clustering of factor performances (3 clusters)
+//---------------------------------------------------------------------
+perf_idx = float(na)
+
+var from = switch fromCluster
+    "Best"    => 2
+    "Average" => 1
+    "Worst"   => 0
+
+var targetFactor = float(na)
+
+if last_bar_index - bar_index <= maxData
+    // Collect current performances + factors
+    data     = array.new<float>(0)
+    factorArr = array.new<float>(0)
+    for element in holder
+        data.push(element.perf)
+        factorArr.push(element.factor)
+
+    // Init centroids from quartiles
+    centroids = array.new<float>(0)
+    centroids.push(data.percentile_linear_interpolation(25))
+    centroids.push(data.percentile_linear_interpolation(50))
+    centroids.push(data.percentile_linear_interpolation(75))
+
+    var array<array<float>> factorsClusters = na
+    var array<array<float>> perfClustersTmp = na
+
+    if not na(centroids.first())
+        for _ = 0 to maxIter
+            factorsClusters := array.from(array.new<float>(0), array.new<float>(0), array.new<float>(0))
+            perfClustersTmp := array.from(array.new<float>(0), array.new<float>(0), array.new<float>(0))
+
+            // Assign each factor to the nearest centroid
+            i = 0
+            for value in data
+                dist = array.new<float>(0)
+                for centroid in centroids
+                    dist.push(math.abs(value - centroid))
+                idx = dist.indexof(dist.min())
+                perfClustersTmp.get(idx).push(value)
+                factorsClusters.get(idx).push(factorArr.get(i))
+                i += 1
+
+            // Recompute centroids
+            newCentroids = array.new<float>(0)
+            for cluster in perfClustersTmp
+                newCentroids.push(cluster.size() > 0 ? cluster.avg() : na)
+
+            moved = false
+            for j = 0 to 2
+                a = newCentroids.get(j)
+                b = centroids.get(j)
+                if not na(a) and not na(b) and a != b
+                    moved := true
+                if not na(a)
+                    centroids.set(j, a)
+            if not moved
+                break
+
+        // Selected cluster -> target factor + performance index
+        selFactors = factorsClusters.get(from)
+        selPerfs   = perfClustersTmp.get(from)
+        if selFactors.size() > 0
+            targetFactor := selFactors.avg()
+            den = ta.ema(math.abs(close - close[1]), int(perfAlpha))
+            perf_idx := math.max(nz(selPerfs.avg()), 0) / den
+
+//---------------------------------------------------------------------
+// Live SuperTrend using the adaptive (clustered) factor
+//---------------------------------------------------------------------
+var float upper = na
+var float lower = na
+var int   os    = 0
+
+up = hl2 + atr * targetFactor
+dn = hl2 - atr * targetFactor
+upper := close[1] < upper ? math.min(up, upper) : up
+lower := close[1] > lower ? math.max(dn, lower) : dn
+os := close > upper ? 1 : close < lower ? 0 : os
+float ts = os == 1 ? lower : upper
+
+// Adaptive trailing MA of the trailing stop (visual aid, as in the original)
+var float ama = na
+if na(ama) and not na(ts)
+    ama := ts
+if not na(ts) and not na(perf_idx)
+    ama := nz(ama) + perf_idx * (ts - nz(ama))
+
+signalStrength = int(nz(perf_idx) * 10)
+
+//---------------------------------------------------------------------
+// 200 SMA trend filter + signals
+//---------------------------------------------------------------------
+ma = ta.sma(close, maLen)
+
+bullFlip = os == 1 and os[1] == 0
+bearFlip = os == 0 and os[1] == 1
+
+inWindow = time >= startDate and time <= endDate
+strengthOk = minStrength == 0 or signalStrength >= minStrength
+
+longCondition = bullFlip and close > ma and strengthOk and inWindow
+exitCondition = bearFlip or (exitBelowMa and ta.crossunder(close, ma))
+
+if longCondition
+    strategy.entry("Long", strategy.long)
+if exitCondition and strategy.position_size > 0
+    strategy.close("Long", comment = bearFlip ? "ST flip" : "below MA")
+
+//---------------------------------------------------------------------
+// Plots
+//---------------------------------------------------------------------
+plot(ma, "SMA 200", color = color.new(color.orange, 0), linewidth = 2)
+plot(ts, "SuperTrend AI", color = os == 1 ? color.new(color.teal, 0) : color.new(color.red, 0), style = plot.style_linebr)
+plot(ama, "Trailing AMA", color = color.new(color.gray, 50))
+
+plotshape(bullFlip and close > ma and strengthOk, "Buy", shape.labelup,   location.belowbar, color.new(color.teal, 0), text = "BUY",  textcolor = color.white, size = size.tiny)
+plotshape(bearFlip, "Sell", shape.labeldown, location.abovebar, color.new(color.red, 0),  text = "SELL", textcolor = color.white, size = size.tiny)
+
+if bullFlip and close > ma and strengthOk and barstate.isconfirmed
+    label.new(bar_index, low, str.tostring(signalStrength), style = label.style_none, textcolor = color.teal, size = size.small)
+
+// Warn if not on the daily timeframe
+if barstate.islast and timeframe.period != "D"
+    var table warn = table.new(position.top_center, 1, 1)
+    warn.cell(0, 0, "⚠ Strategy is designed for the DAILY timeframe (current: " + timeframe.period + ")", text_color = color.white, bgcolor = color.new(color.red, 20))

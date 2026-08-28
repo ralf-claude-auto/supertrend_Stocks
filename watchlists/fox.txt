@@ -1,0 +1,29 @@
+# FOX watchlist — REPLACE THIS SAMPLE with your real TradingView export:
+#   TradingView -> Watchlist menu (top right of the watchlist panel)
+#   -> "Export list..." -> save the .txt here as watchlists/fox.txt
+#
+# Both formats work:
+#   - TradingView export:  XETR:SAP,NASDAQ:AAPL,NYSE:KO  (### section headers are ignored)
+#   - Plain Yahoo tickers: one per line, German stocks with .DE suffix
+#
+# Sample German (XETRA) + US symbols so you can test the pipeline right away:
+
+###Germany
+XETR:SAP
+XETR:SIE
+XETR:ALV
+XETR:MBG
+XETR:BAS
+XETR:IFX
+XETR:DTE
+XETR:RHM
+
+###USA
+NASDAQ:AAPL
+NASDAQ:MSFT
+NASDAQ:NVDA
+NASDAQ:AMZN
+NASDAQ:GOOGL
+NYSE:JPM
+NYSE:KO
+NYSE:CAT
