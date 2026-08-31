@@ -74,7 +74,24 @@ section 5b). `--rs` on `run_backtest.py` enables the gate if you want to re-test
 
 # same signals, but time the entry on a 1h MA cross instead
 .venv/Scripts/python.exe backtest/run_rr_1h.py --rr 3
+
+# daily signal ARMS the stock; the 1h SuperTrend executes entries while armed
+.venv/Scripts/python.exe backtest/run_armed_1h.py --rr 3 --stop hourly
 ```
+
+`run_armed_1h.py` is the best of the three. The daily signal arms a stock and it
+stays armed until the daily SuperTrend breaks or price closes below the MA, so an
+entry is not restricted to the day after the signal. Every bullish flip of the
+SAME SuperTrend on 1h bars is an entry while armed, and the 1h SuperTrend at entry
+is the stop - roughly 3% rather than the daily line's ~14%.
+
+Use `--stop hourly`. With `--stop daily` the stop sits on the daily SuperTrend,
+which is the very line whose break disarms the position, so it is almost never
+reached (11 of 644 exits) and every R is measured against risk that is never
+actually taken. It reports a profit factor above 5 and means nothing.
+
+The run also re-tests the trades under a `max_open` position limit, because the
+unconstrained figures assume every signal is funded the instant it fires.
 
 `backfill_scans.py` writes one CSV per session plus `_signals.csv`, which feeds
 both backtests. Use a long window (`--days 1825`) for the backtests: over 90 days
