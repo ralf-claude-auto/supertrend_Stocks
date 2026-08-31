@@ -116,7 +116,13 @@ def main() -> int:
                 continue
             windows_total += 1
             end = disarm if disarm is not None else h.index.max()
-            seg = h[(h.index > arm) & (h.index <= end)]
+            # From the day AFTER the arm, never the arming session itself. `arm` is
+            # a daily bar stamped at midnight, so `h.index > arm` would admit that
+            # day's own hourly bars - hours before its close confirmed the daily
+            # signal. That is lookahead, and it flattered the result badly: those
+            # entries averaged +1.05R against +0.50R for the rest, 14% of all profit
+            # from 6.9% of trades.
+            seg = h[(h.index.normalize() > arm) & (h.index <= end)]
             if seg.empty:
                 continue
             flips = seg.index[hflip[h.index.searchsorted(seg.index)]]

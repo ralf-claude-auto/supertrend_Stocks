@@ -112,7 +112,10 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
             end = disarm if disarm is not None else h.index.max()
             if end < start:
                 continue
-            seg = h[(h.index > max(arm, start)) & (h.index <= end)]
+            # From the day AFTER the arm, never the arming session itself: `arm` is
+            # stamped at midnight, so a plain `>` would admit that day's own hourly
+            # bars, hours before its close confirmed the daily signal.
+            seg = h[(h.index.normalize() > arm) & (h.index > start) & (h.index <= end)]
             if seg.empty:
                 continue
             for ft in seg.index[hflip[h.index.searchsorted(seg.index)]]:
@@ -212,6 +215,9 @@ def main() -> int:
     ap.add_argument("--ma-length", type=int, default=200)
     ap.add_argument("--cache-dir", default="data_cache")
     ap.add_argument("--status", action="store_true", help="do not refresh data")
+    ap.add_argument("--replay-from", default=None,
+                    help="answer 'what would be open now if I had started on DATE' "
+                         "without touching the saved config or the live log")
     ap.add_argument("--outdir", default="paper")
     args = ap.parse_args()
     if not CFG.exists():
@@ -220,7 +226,13 @@ def main() -> int:
         args.max_slots = args.max_slots if args.max_slots is not None else 6
         args.rr = args.rr if args.rr is not None else 3.0
     cfg = load_config(args)
-    CFG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    if args.replay_from:
+        # A what-if: override the start in memory only. Writing it would silently
+        # restart the live forward record from a backdated day.
+        cfg = {**cfg, "start": args.replay_from}
+        print(f"REPLAY what-if from {cfg['start']} - the saved log is untouched\n")
+    else:
+        CFG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
     closed, open_now, curve = simulate(cfg, args.cache_dir, not args.status)
     out = Path(args.outdir)
