@@ -9,3 +9,4 @@ data_cache/intraday/
 paper/open_positions.csv
 paper/trades.csv
 paper/equity.csv
+paper/cron.log
