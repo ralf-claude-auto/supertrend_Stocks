@@ -144,3 +144,49 @@ def load_daily(ticker: str, start: str | None, end: str | None,
     if end:
         df = df[df.index <= pd.Timestamp(end)]
     return df.dropna(subset=["High", "Low", "Close"])
+
+def load_intraday(ticker: str, interval: str = "1h", days: int = 720,
+                  cache_dir: str | Path = "data_cache/intraday") -> pd.DataFrame:
+    """Intraday OHLC via yfinance, cached per (ticker, interval).
+
+    Yahoo serves at most ~730 days of hourly history, so `days` is clamped: any
+    study built on this is bounded by that, not by the daily cache's reach.
+
+    The index is returned TIMEZONE-NAIVE in the exchange's own local time. Hourly
+    bars come back tz-aware (and German and US symbols carry different zones), and
+    comparing those against a tz-naive daily signal date raises; normalising once
+    here keeps every caller from having to think about it.
+    """
+    import yfinance as yf
+
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    safe = ticker.replace("/", "_").replace("^", "_")
+    cache_file = cache_dir / f"{safe}_{interval}.csv"
+
+    df = None
+    if cache_file.exists():
+        df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+        if not pd.api.types.is_datetime64_any_dtype(df.index):
+            # Written by an older version that stored tz-AWARE stamps. A single
+            # file spans a DST change, so its offsets are mixed (+02:00 and
+            # +01:00) and pandas cannot give them one dtype - it hands back
+            # strings, and every later date comparison raises. Refetch and store
+            # naive local time instead of trying to repair it.
+            df = None
+
+    if df is None:
+        df = yf.download(ticker, period=f"{min(days, 730)}d", interval=interval,
+                         auto_adjust=True, progress=False)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df[["Open", "High", "Low", "Close", "Volume"]]
+        if getattr(df.index, "tz", None) is not None:
+            df.index = df.index.tz_localize(None)
+        df.to_csv(cache_file)  # naive local time, so the round trip is stable
+
+    if getattr(df.index, "tz", None) is not None:
+        df.index = df.index.tz_localize(None)
+    return df.dropna(subset=["High", "Low", "Close"]).sort_index()

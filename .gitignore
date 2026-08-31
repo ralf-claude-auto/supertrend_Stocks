@@ -5,3 +5,4 @@ __pycache__/
 data_cache/
 results/
 scans/history_5y/2*.csv
+data_cache/intraday/

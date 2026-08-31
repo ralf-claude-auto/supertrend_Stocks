@@ -63,6 +63,33 @@ Note that relative strength is used here to *rank and classify*, not to gate
 entries — as an entry filter it tested worse than no filter at all (FINDINGS.md
 section 5b). `--rs` on `run_backtest.py` enables the gate if you want to re-test it.
 
+## 0c. Daily list history and the risk:reward backtests
+
+```bash
+# rebuild the SIGNAL / LONG / SHORT lists for every past session
+.venv/Scripts/python.exe backtest/backfill_scans.py --days 90
+
+# next-day entry, stop at the SuperTrend, target at rr x risk
+.venv/Scripts/python.exe backtest/run_rr.py --rr 3
+
+# same signals, but time the entry on a 1h MA cross instead
+.venv/Scripts/python.exe backtest/run_rr_1h.py --rr 3
+```
+
+`backfill_scans.py` writes one CSV per session plus `_signals.csv`, which feeds
+both backtests. Use a long window (`--days 1825`) for the backtests: over 90 days
+most 3:1 trades have not resolved yet, and a trade that has not resolved cannot
+be counted.
+
+Both backtests report in **R** (multiples of the initial risk) over RESOLVED
+trades only, and the equity curve assumes a fixed fraction of capital risked per
+trade (1% by default) rather than compounding percent returns, which would imply
+putting all capital into each of many overlapping positions.
+
+**Note the hourly limit**: Yahoo serves ~730 days of 1h bars, so `run_rr_1h.py`
+covers roughly two years while `run_rr.py` covers five. It prints a daily
+next-open baseline over the SAME signals so the two are comparable.
+
 ## 1. Backtest inside TradingView (per symbol)
 
 1. Open TradingView, set the chart to **1D**.
