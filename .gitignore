@@ -1,6 +1,7 @@
-__pycache__/
+*.log
 *.pyc
+.venv/
+__pycache__/
 data_cache/
 results/
-.venv/
-*.log
+scans/history_5y/2*.csv
