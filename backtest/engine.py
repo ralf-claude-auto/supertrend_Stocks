@@ -1,9 +1,15 @@
-"""Backtest engine: long-only, signal-on-close execution (mirrors the Pine
-strategy's process_orders_on_close=true behaviour).
+"""Backtest engine — long and short, signal-on-close execution.
 
-Rules:
-  BUY  : SuperTrend AI flips bullish AND close > SMA(200)
-  SELL : SuperTrend AI flips bearish (optionally also close crossing under SMA)
+Mirrors pine/supertrend_mtf_strategy.pine (process_orders_on_close = true):
+
+  LONG   SuperTrend flips bullish  AND close > long MA   AND strength >= min
+         AND the higher-timeframe filter passes for longs
+  SHORT  SuperTrend flips bearish  AND close < short MA  AND strength >= min
+         AND the higher-timeframe filter passes for shorts
+
+Long and short carry independent parameters. Exits are evaluated before entries
+on the same bar, so a flip can close one side and open the other when
+allow_reverse is set — the Pine "Stop-and-reverse" input.
 """
 
 from __future__ import annotations
@@ -13,14 +19,31 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from supertrend_ai import SuperTrendAIParams, supertrend_ai
+from htf import HtfParams, htf_filter
+from relative_strength import RsParams
+from supertrend_ai import SuperTrendParams, supertrend
+
+
+@dataclass
+class SideParams:
+    """One side of the strategy. Long and short each get their own."""
+    enabled: bool = True
+    ma_length: int = 200
+    ma_type: str = "sma"       # sma | ema
+    min_strength: int = 0      # 0-9, 0 = off
+    ma_exit: bool = False      # long: exit on cross under MA; short: cross over
 
 
 @dataclass
 class StrategyParams:
-    st: SuperTrendAIParams = field(default_factory=SuperTrendAIParams)
-    ma_length: int = 200
-    exit_below_ma: bool = False
+    st: SuperTrendParams = field(default_factory=SuperTrendParams)
+    long: SideParams = field(default_factory=lambda: SideParams(enabled=True))
+    short: SideParams = field(default_factory=lambda: SideParams(enabled=False))
+    htf: HtfParams = field(default_factory=HtfParams)
+    # Relative strength vs a benchmark. rs_frame must be supplied by the caller
+    # when enabled - the engine cannot download the benchmark itself.
+    rs: RsParams = field(default_factory=lambda: RsParams(enabled=False))
+    allow_reverse: bool = True
     commission_pct: float = 0.1  # per side, in percent
 
 
@@ -28,6 +51,7 @@ class StrategyParams:
 class Trade:
     entry_date: pd.Timestamp
     entry_price: float
+    direction: str = "long"       # long | short
     exit_date: pd.Timestamp | None = None
     exit_price: float | None = None
     exit_reason: str = ""
@@ -37,7 +61,10 @@ class Trade:
     def return_pct(self) -> float | None:
         if self.exit_price is None:
             return None
-        return (self.exit_price / self.entry_price - 1.0) * 100.0
+        if self.direction == "long":
+            return (self.exit_price / self.entry_price - 1.0) * 100.0
+        # Short: profit when price falls, measured on the position's notional.
+        return (self.entry_price - self.exit_price) / self.entry_price * 100.0
 
 
 @dataclass
@@ -58,16 +85,14 @@ class BacktestResult:
         wins = rets[rets > 0]
         losses = rets[rets <= 0]
         total_return = (self.equity.iloc[-1] / self.equity.iloc[0] - 1) * 100 if len(self.equity) else np.nan
-        # Max drawdown on equity
-        if len(self.equity):
-            dd = (self.equity / self.equity.cummax() - 1).min() * 100
-        else:
-            dd = np.nan
+        dd = (self.equity / self.equity.cummax() - 1).min() * 100 if len(self.equity) else np.nan
         gross_win = wins.sum() if wins.size else 0.0
         gross_loss = -losses.sum() if losses.size else 0.0
         return {
             "ticker": self.ticker,
             "trades": len(closed),
+            "longs": sum(1 for t in closed if t.direction == "long"),
+            "shorts": sum(1 for t in closed if t.direction == "short"),
             "open_trade": any(t.exit_price is None for t in self.trades),
             "win_rate_pct": round(100 * wins.size / rets.size, 1) if rets.size else np.nan,
             "avg_trade_pct": round(rets.mean(), 2) if rets.size else np.nan,
@@ -79,58 +104,108 @@ class BacktestResult:
         }
 
 
+def _ma(close: pd.Series, length: int, kind: str) -> pd.Series:
+    if kind == "ema":
+        return close.ewm(span=length, adjust=False, min_periods=length).mean()
+    return close.rolling(length).mean()
+
+
 def run_backtest(ticker: str, df: pd.DataFrame, params: StrategyParams,
-                 trade_start: pd.Timestamp | None = None) -> BacktestResult:
+                 trade_start: pd.Timestamp | None = None,
+                 st_result=None, htf_frame: pd.DataFrame | None = None,
+                 rs_frame: pd.DataFrame | None = None) -> BacktestResult:
     """Run the strategy on daily OHLC data.
 
-    df should include warmup history before trade_start; trades are only
-    taken from trade_start onward.
+    df should include warmup history before trade_start; trades are only taken
+    from trade_start onward.
+
+    st_result / htf_frame let a caller pass in an already-computed SuperTrend or
+    HTF filter. Neither depends on the side settings, so a grid search over many
+    configurations computes each once per symbol instead of once per run. They
+    MUST correspond to params.st / params.htf — nothing here re-validates that.
     """
-    res = supertrend_ai(df, params.st)
+    res = supertrend(df, params.st) if st_result is None else st_result
     close = df["Close"]
-    ma = close.rolling(params.ma_length).mean()
+    strength = res.signal_strength
 
-    buy = res.buy & (close > ma)
-    sell = res.sell.copy()
-    if params.exit_below_ma:
-        cross_under = (close < ma) & (close.shift(1) >= ma.shift(1))
-        sell = sell | cross_under
+    ma_long = _ma(close, params.long.ma_length, params.long.ma_type)
+    ma_short = _ma(close, params.short.ma_length, params.short.ma_type)
+    htf = htf_filter(df, params.htf) if htf_frame is None else htf_frame
 
-    if trade_start is not None:
-        in_window = df.index >= trade_start
+    if params.rs.enabled:
+        if rs_frame is None:
+            raise ValueError("params.rs.enabled but no rs_frame supplied - "
+                             "the caller must load the benchmark and pass it in")
+        rs_long, rs_short = rs_frame["ok_long"], rs_frame["ok_short"]
     else:
-        in_window = np.ones(len(df), dtype=bool)
+        rs_long = rs_short = pd.Series(True, index=df.index)
+
+    long_sig = (res.buy & (close > ma_long)
+                & (strength >= params.long.min_strength)
+                & htf["ok_long"] & rs_long) \
+        if params.long.enabled else pd.Series(False, index=df.index)
+    short_sig = (res.sell & (close < ma_short)
+                 & (strength >= params.short.min_strength)
+                 & htf["ok_short"] & rs_short) \
+        if params.short.enabled else pd.Series(False, index=df.index)
+
+    cross_under = (close < ma_long) & (close.shift(1) >= ma_long.shift(1))
+    cross_over = (close > ma_short) & (close.shift(1) <= ma_short.shift(1))
+    long_ma_exit = cross_under if params.long.ma_exit else pd.Series(False, index=df.index)
+    short_ma_exit = cross_over if params.short.ma_exit else pd.Series(False, index=df.index)
+
+    in_window = (df.index >= trade_start) if trade_start is not None \
+        else np.ones(len(df), dtype=bool)
 
     fee = params.commission_pct / 100.0
     trades: list[Trade] = []
     position: Trade | None = None
-    equity = []
+    equity: list[float] = []
     eq = 1.0
-    entry_close = np.nan
-
     idx = df.index
+
+    def mark(price: float) -> float:
+        """Equity including the open position's mark-to-market."""
+        if position is None:
+            return eq
+        if position.direction == "long":
+            return eq * (price / position.entry_price)
+        # A 100%-of-equity short: 1 + (entry - price)/entry. Floored at zero —
+        # a short that more than doubles against you is a wipeout, not negative
+        # equity.
+        return eq * max(2.0 - price / position.entry_price, 0.0)
+
     for i in range(len(df)):
         c = close.iloc[i]
-        if position is None:
-            if bool(buy.iloc[i]) and in_window[i] and not np.isnan(ma.iloc[i]):
-                position = Trade(entry_date=idx[i], entry_price=c,
-                                 strength=int(res.signal_strength.iloc[i]))
-                entry_close = c
-                eq *= (1 - fee)
-        else:
-            if bool(sell.iloc[i]):
+        closed_this_bar = False
+
+        if position is not None:
+            if position.direction == "long":
+                hit = bool(res.sell.iloc[i]) or bool(long_ma_exit.iloc[i])
+                reason = "ST flip" if bool(res.sell.iloc[i]) else "below MA"
+            else:
+                hit = bool(res.buy.iloc[i]) or bool(short_ma_exit.iloc[i])
+                reason = "ST flip" if bool(res.buy.iloc[i]) else "above MA"
+            if hit:
                 position.exit_date = idx[i]
                 position.exit_price = c
-                position.exit_reason = "ST flip" if bool(res.sell.iloc[i]) else "below MA"
+                position.exit_reason = reason
+                eq = mark(c) * (1 - fee)
                 trades.append(position)
-                eq *= (c / entry_close) * (1 - fee)
                 position = None
-                entry_close = np.nan
-            # mark-to-market handled below
-        if position is not None and not np.isnan(entry_close):
-            equity.append(eq * (c / entry_close))
-        else:
-            equity.append(eq)
+                closed_this_bar = True
+
+        if position is None and in_window[i] and not (closed_this_bar and not params.allow_reverse):
+            if bool(long_sig.iloc[i]) and not np.isnan(ma_long.iloc[i]):
+                position = Trade(entry_date=idx[i], entry_price=c, direction="long",
+                                 strength=int(strength.iloc[i]))
+                eq *= (1 - fee)
+            elif bool(short_sig.iloc[i]) and not np.isnan(ma_short.iloc[i]):
+                position = Trade(entry_date=idx[i], entry_price=c, direction="short",
+                                 strength=int(strength.iloc[i]))
+                eq *= (1 - fee)
+
+        equity.append(mark(c))
 
     if position is not None:
         trades.append(position)  # still open

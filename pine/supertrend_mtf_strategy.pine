@@ -1,0 +1,357 @@
+//@version=6
+// SuperTrend MTF — Long/Short with higher-timeframe trend & momentum filter
+//
+// Supersedes pine/supertrend_ai_200ma_strategy.pine (v5, long only, no HTF filter).
+//
+// ── Engines ────────────────────────────────────────────────────────────────
+//   Adaptive (k-means)  Re-implementation of the clustering idea in LuxAlgo's
+//                       open-source "SuperTrend AI": a bank of SuperTrends over a
+//                       factor range is scored by an exponentially weighted
+//                       directional P&L, k-means (k=3) clusters the scores every
+//                       bar, and the mean factor of the chosen cluster drives the
+//                       live SuperTrend.
+//   Classic             One SuperTrend at a fixed factor (ta.supertrend).
+//
+// Both engines publish the same 0-9 signal strength (performance index / mean
+// absolute bar change), so the strength filter behaves identically either way.
+//
+// ── Entries ────────────────────────────────────────────────────────────────
+//   LONG   SuperTrend flips bullish  AND close > long MA   AND strength >= min
+//          AND higher-timeframe filter passes for longs
+//   SHORT  SuperTrend flips bearish  AND close < short MA  AND strength >= min
+//          AND higher-timeframe filter passes for shorts
+//
+// Long and short carry INDEPENDENT parameters — their own MA length, minimum
+// strength, MA-based exit and their own HTF thresholds — so the short side is not
+// forced to be a mirror image of the long side. Shorts are OFF by default, so the
+// defaults reproduce the original long-only behaviour plus the HTF filter.
+
+strategy("SuperTrend MTF — Long/Short",
+     overlay              = true,
+     initial_capital      = 100000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 100,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.1,
+     process_orders_on_close = true,
+     calc_on_every_tick   = false,
+     max_labels_count     = 500)
+
+//---------------------------------------------------------------------
+// Inputs — engine
+//---------------------------------------------------------------------
+G_ENG = "Engine"
+engine      = input.string("Adaptive (k-means)", "SuperTrend engine", options = ["Adaptive (k-means)", "Classic"], group = G_ENG)
+atrLen      = input.int(10,    "ATR Length", minval = 1, group = G_ENG)
+clFactor    = input.float(3.0, "Classic: factor", minval = 0.1, step = 0.1, group = G_ENG)
+minMult     = input.float(1.0, "Adaptive: factor min", minval = 0, step = 0.5, group = G_ENG)
+maxMult     = input.float(5.0, "Adaptive: factor max", minval = 0, step = 0.5, group = G_ENG)
+factorStep  = input.float(0.5, "Adaptive: factor step", minval = 0.1, step = 0.1, group = G_ENG)
+perfAlpha   = input.float(10,  "Performance memory", minval = 2, group = G_ENG)
+fromCluster = input.string("Best", "Adaptive: from cluster", options = ["Best", "Average", "Worst"], group = G_ENG)
+maxIter     = input.int(1000,  "Adaptive: max k-means iterations", minval = 1, group = G_ENG)
+maxData     = input.int(10000, "Adaptive: max historical bars", minval = 100, group = G_ENG)
+
+//---------------------------------------------------------------------
+// Inputs — long side
+//---------------------------------------------------------------------
+G_L = "Long side"
+enableLong    = input.bool(true,  "Enable longs", group = G_L)
+longMaLen     = input.int(200,    "Long: MA length (close must be ABOVE)", minval = 1, group = G_L)
+longMaType    = input.string("SMA", "Long: MA type", options = ["SMA", "EMA"], group = G_L)
+longMinStr    = input.int(0,      "Long: min signal strength (0-9, 0 = off)", minval = 0, maxval = 9, group = G_L)
+longExitBelow = input.bool(false, "Long: also exit when close crosses under its MA", group = G_L)
+
+//---------------------------------------------------------------------
+// Inputs — short side (independent, NOT mirrored)
+//---------------------------------------------------------------------
+G_S = "Short side"
+enableShort    = input.bool(false, "Enable shorts", group = G_S)
+shortMaLen     = input.int(200,    "Short: MA length (close must be BELOW)", minval = 1, group = G_S)
+shortMaType    = input.string("SMA", "Short: MA type", options = ["SMA", "EMA"], group = G_S)
+shortMinStr    = input.int(0,      "Short: min signal strength (0-9, 0 = off)", minval = 0, maxval = 9, group = G_S)
+shortExitAbove = input.bool(false, "Short: also exit when close crosses over its MA", group = G_S)
+allowReverse   = input.bool(true,  "Stop-and-reverse (a flip may close one side and open the other)", group = G_S)
+
+//---------------------------------------------------------------------
+// Inputs — higher-timeframe filter
+//---------------------------------------------------------------------
+G_H = "Higher-timeframe filter"
+useHtf     = input.bool(true, "Enable HTF filter", group = G_H)
+htfTf      = input.timeframe("W", "Higher timeframe", group = G_H)
+htfConfirm = input.bool(true, "Use only CLOSED higher-timeframe bars (no repaint)", group = G_H)
+
+useAdx     = input.bool(true, "Trend strength: require ADX", group = G_H)
+adxLen     = input.int(14, "ADX / DI length", minval = 1, group = G_H)
+adxSmooth  = input.int(14, "ADX smoothing", minval = 1, group = G_H)
+adxMin     = input.float(20, "Minimum ADX", minval = 0, step = 1, group = G_H)
+adxNeedDi  = input.bool(true, "Also require DI agreement (DI+ > DI- for longs)", group = G_H)
+
+useMom      = input.bool(true, "Momentum: require HTF momentum", group = G_H)
+momMode     = input.string("RSI", "Momentum source", options = ["RSI", "ROC %", "MACD histogram"], group = G_H)
+rsiLen      = input.int(14, "RSI length", minval = 1, group = G_H)
+rsiLongMin  = input.float(50, "RSI: long needs >=", group = G_H)
+rsiShortMax = input.float(50, "RSI: short needs <=", group = G_H)
+rocLen      = input.int(10, "ROC length", minval = 1, group = G_H)
+macdFast    = input.int(12, "MACD fast", minval = 1, group = G_H)
+macdSlow    = input.int(26, "MACD slow", minval = 1, group = G_H)
+macdSig     = input.int(9,  "MACD signal", minval = 1, group = G_H)
+zeroLongMin  = input.float(0, "ROC/MACD: long needs >=",  group = G_H)
+zeroShortMax = input.float(0, "ROC/MACD: short needs <=", group = G_H)
+
+//---------------------------------------------------------------------
+// Inputs — backtest window & display
+//---------------------------------------------------------------------
+G_B = "Backtest window"
+startDate = input.time(timestamp("1 Jan 2015"), "Start date", group = G_B)
+endDate   = input.time(timestamp("1 Jan 2099"), "End date",   group = G_B)
+showTable = input.bool(true, "Show status table", group = G_B)
+
+if minMult > maxMult
+    runtime.error("Adaptive: factor min must be <= factor max")
+
+//---------------------------------------------------------------------
+// Types (Pine has no arrays of arrays, hence the vector wrapper)
+//---------------------------------------------------------------------
+type stObj
+    float upper
+    float lower
+    float output
+    float perf
+    float factor
+    int   trend
+
+type vector
+    array<float> out
+
+//---------------------------------------------------------------------
+// Shared
+//---------------------------------------------------------------------
+atr = ta.atr(atrLen)
+den = ta.ema(math.abs(close - close[1]), int(perfAlpha))
+adaptive = engine == "Adaptive (k-means)"
+
+//---------------------------------------------------------------------
+// Engine A — adaptive SuperTrend bank + k-means over factor performance
+//---------------------------------------------------------------------
+var holder = array.new<stObj>(0)
+
+if barstate.isfirst and adaptive
+    for i = 0 to int((maxMult - minMult) / factorStep)
+        f = minMult + i * factorStep
+        holder.push(stObj.new(hl2, hl2, hl2, 0., f, 0))
+
+if adaptive
+    for element in holder
+        up = hl2 + atr * element.factor
+        dn = hl2 - atr * element.factor
+        element.trend  := close > element.upper ? 1 : close < element.lower ? 0 : element.trend
+        element.upper  := close[1] < element.upper ? math.min(up, element.upper) : up
+        element.lower  := close[1] > element.lower ? math.max(dn, element.lower) : dn
+        diff = nz(math.sign(close[1] - element.output))
+        element.perf   += 2 / (perfAlpha + 1) * (nz(close - close[1]) * diff - element.perf)
+        element.output := element.trend == 1 ? element.lower : element.upper
+
+var fromIdx = switch fromCluster
+    "Best"    => 2
+    "Average" => 1
+    "Worst"   => 0
+
+var float targetFactor = na
+float adaptivePerfIdx = na
+
+if adaptive and last_bar_index - bar_index <= maxData
+    data      = array.new<float>(0)
+    factorArr = array.new<float>(0)
+    for element in holder
+        data.push(element.perf)
+        factorArr.push(element.factor)
+
+    centroids = array.new<float>(0)
+    centroids.push(data.percentile_linear_interpolation(25))
+    centroids.push(data.percentile_linear_interpolation(50))
+    centroids.push(data.percentile_linear_interpolation(75))
+
+    factorsClusters = array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+    perfClusters    = array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+
+    if not na(centroids.get(0))
+        for _ = 0 to maxIter
+            factorsClusters := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+            perfClusters    := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+
+            i = 0
+            for value in data
+                dist = array.new<float>(0)
+                for centroid in centroids
+                    dist.push(math.abs(value - centroid))
+                idx = dist.indexof(dist.min())
+                perfClusters.get(idx).out.push(value)
+                factorsClusters.get(idx).out.push(factorArr.get(i))
+                i += 1
+
+            changed = false
+            for j = 0 to 2
+                cl = perfClusters.get(j).out
+                if cl.size() > 0
+                    newCentroid = cl.avg()
+                    if newCentroid != centroids.get(j)
+                        changed := true
+                        centroids.set(j, newCentroid)
+            if not changed
+                break
+
+        selFactors = factorsClusters.get(fromIdx).out
+        selPerfs   = perfClusters.get(fromIdx).out
+        if selFactors.size() > 0
+            targetFactor    := selFactors.avg()
+            adaptivePerfIdx := math.max(nz(selPerfs.avg()), 0) / den
+
+var float aUpper = na
+var float aLower = na
+var int   aOs    = 0
+
+if adaptive
+    adUp = hl2 + atr * targetFactor
+    adDn = hl2 - atr * targetFactor
+    aUpper := close[1] < aUpper ? math.min(adUp, aUpper) : adUp
+    aLower := close[1] > aLower ? math.max(adDn, aLower) : adDn
+    aOs    := close > aUpper ? 1 : close < aLower ? 0 : aOs
+
+//---------------------------------------------------------------------
+// Engine B — classic SuperTrend, with a matching performance index so the
+// strength filter means the same thing on both engines
+//---------------------------------------------------------------------
+[clLine, clDir] = ta.supertrend(clFactor, atrLen)
+// ta.supertrend: direction is -1 in an uptrend, +1 in a downtrend.
+clOs = clDir < 0 ? 1 : 0
+
+var float clPerf = 0.0
+clDiff  = nz(math.sign(close[1] - nz(clLine[1], close[1])))
+clPerf := nz(clPerf[1]) + 2 / (perfAlpha + 1) * (nz(close - close[1]) * clDiff - nz(clPerf[1]))
+classicPerfIdx = math.max(clPerf, 0) / den
+
+//---------------------------------------------------------------------
+// Unified SuperTrend state
+//---------------------------------------------------------------------
+os      = adaptive ? aOs : clOs
+ts      = adaptive ? (aOs == 1 ? aLower : aUpper) : clLine
+perfIdx = adaptive ? adaptivePerfIdx : classicPerfIdx
+
+signalStrength = math.min(int(nz(perfIdx) * 10), 9)
+
+bullFlip = os == 1 and os[1] == 0
+bearFlip = os == 0 and os[1] == 1
+
+//---------------------------------------------------------------------
+// Higher-timeframe trend strength (ADX / DI) and momentum
+//---------------------------------------------------------------------
+f_adx(int len, int smooth, int off) =>
+    up      = ta.change(high)
+    down    = -ta.change(low)
+    plusDM  = na(up)   ? na : (up   > down and up   > 0 ? up   : 0)
+    minusDM = na(down) ? na : (down > up   and down > 0 ? down : 0)
+    trur    = ta.rma(ta.tr(true), len)
+    plus    = fixnan(100 * ta.rma(plusDM,  len) / trur)
+    minus   = fixnan(100 * ta.rma(minusDM, len) / trur)
+    s       = plus + minus
+    adxv    = 100 * ta.rma(math.abs(plus - minus) / (s == 0 ? 1 : s), smooth)
+    [adxv[off], plus[off], minus[off]]
+
+// All three momentum series are computed unconditionally and only then selected.
+// Calling ta.rsi/ta.roc inside the switch would evaluate them only on the bars
+// where their branch is taken, and both carry internal state across bars.
+f_mom(string mode, int rLen, int cLen, int mf, int ms, int msig, int off) =>
+    [_ml, _sl, hist] = ta.macd(close, mf, ms, msig)
+    rsiV = ta.rsi(close, rLen)
+    rocV = ta.roc(close, cLen)
+    float v = switch mode
+        "RSI"            => rsiV
+        "ROC %"          => rocV
+        "MACD histogram" => hist
+        => na
+    v[off]
+
+htfOff = htfConfirm ? 1 : 0
+
+[htfAdx, htfDiPlus, htfDiMinus] = request.security(syminfo.tickerid, htfTf, f_adx(adxLen, adxSmooth, htfOff), lookahead = barmerge.lookahead_off)
+htfMom = request.security(syminfo.tickerid, htfTf, f_mom(momMode, rsiLen, rocLen, macdFast, macdSlow, macdSig, htfOff), lookahead = barmerge.lookahead_off)
+
+momLongMin  = momMode == "RSI" ? rsiLongMin  : zeroLongMin
+momShortMax = momMode == "RSI" ? rsiShortMax : zeroShortMax
+
+adxOkLong  = not useAdx or (nz(htfAdx) >= adxMin and (not adxNeedDi or nz(htfDiPlus)  > nz(htfDiMinus)))
+adxOkShort = not useAdx or (nz(htfAdx) >= adxMin and (not adxNeedDi or nz(htfDiMinus) > nz(htfDiPlus)))
+momOkLong  = not useMom or (not na(htfMom) and htfMom >= momLongMin)
+momOkShort = not useMom or (not na(htfMom) and htfMom <= momShortMax)
+
+htfOkLong  = not useHtf or (adxOkLong  and momOkLong)
+htfOkShort = not useHtf or (adxOkShort and momOkShort)
+
+//---------------------------------------------------------------------
+// Trend filter MAs + signals
+//---------------------------------------------------------------------
+maLong  = longMaType  == "EMA" ? ta.ema(close, longMaLen)  : ta.sma(close, longMaLen)
+maShort = shortMaType == "EMA" ? ta.ema(close, shortMaLen) : ta.sma(close, shortMaLen)
+
+inWindow   = time >= startDate and time <= endDate
+longStrOk  = longMinStr  == 0 or signalStrength >= longMinStr
+shortStrOk = shortMinStr == 0 or signalStrength >= shortMinStr
+
+longSignal  = enableLong  and bullFlip and close > maLong  and longStrOk  and htfOkLong
+shortSignal = enableShort and bearFlip and close < maShort and shortStrOk and htfOkShort
+
+// v6 short-circuits `and`, so a ta.* call on the right-hand side is skipped
+// whenever the toggle is false — and these two depend on the previous bar. Compute
+// them unconditionally, then gate.
+maCrossUnder = ta.crossunder(close, maLong)
+maCrossOver  = ta.crossover(close, maShort)
+longMaExit   = longExitBelow  and maCrossUnder
+shortMaExit  = shortExitAbove and maCrossOver
+
+// Exits first, so a flip can close one side before the reverse entry is placed.
+if strategy.position_size > 0 and (bearFlip or longMaExit)
+    strategy.close("Long", comment = bearFlip ? "ST flip" : "below MA")
+if strategy.position_size < 0 and (bullFlip or shortMaExit)
+    strategy.close("Short", comment = bullFlip ? "ST flip" : "above MA")
+
+canOpenLong  = allowReverse or strategy.position_size == 0
+canOpenShort = allowReverse or strategy.position_size == 0
+
+if longSignal and inWindow and canOpenLong
+    strategy.entry("Long", strategy.long)
+if shortSignal and inWindow and canOpenShort
+    strategy.entry("Short", strategy.short)
+
+//---------------------------------------------------------------------
+// Plots
+//---------------------------------------------------------------------
+plot(enableLong ? maLong : na, "Long MA", color = color.new(color.orange, 0), linewidth = 2)
+plot(enableShort and shortMaLen != longMaLen ? maShort : na, "Short MA", color = color.new(color.purple, 0), linewidth = 2)
+plot(ts, "SuperTrend", color = os == 1 ? color.new(color.teal, 0) : color.new(color.red, 0), style = plot.style_linebr)
+
+plotshape(longSignal,  "Long entry",  shape.labelup,   location.belowbar, color.new(color.teal, 0), text = "L", textcolor = color.white, size = size.tiny)
+plotshape(shortSignal, "Short entry", shape.labeldown, location.abovebar, color.new(color.red, 0),  text = "S", textcolor = color.white, size = size.tiny)
+
+// Flips the filters rejected — shows what the HTF filter is costing you.
+plotshape(bullFlip and not longSignal  and enableLong,  "Long blocked",  shape.xcross, location.belowbar, color.new(color.gray, 40), size = size.tiny)
+plotshape(bearFlip and not shortSignal and enableShort, "Short blocked", shape.xcross, location.abovebar, color.new(color.gray, 40), size = size.tiny)
+
+//---------------------------------------------------------------------
+// Status table
+//---------------------------------------------------------------------
+var table t = table.new(position.top_right, 2, 8, border_width = 1)
+
+f_row(int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = color.gray, text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c,          text_size = size.small, text_halign = text.align_right)
+
+if showTable and barstate.islast
+    f_row(0, "engine",   adaptive ? "adaptive" : "classic " + str.tostring(clFactor), color.silver)
+    f_row(1, "chart TF", timeframe.period, color.silver)
+    f_row(2, "HTF",      htfTf + (htfConfirm ? " (closed)" : " (live)"), color.silver)
+    f_row(3, "HTF ADX",  str.tostring(nz(htfAdx), "#.#") + " / " + str.tostring(adxMin, "#.#"), nz(htfAdx) >= adxMin ? color.teal : color.red)
+    f_row(4, "HTF DI+/-", str.tostring(nz(htfDiPlus), "#.#") + " / " + str.tostring(nz(htfDiMinus), "#.#"), nz(htfDiPlus) > nz(htfDiMinus) ? color.teal : color.red)
+    f_row(5, "HTF " + momMode, str.tostring(nz(htfMom), "#.##"), color.silver)
+    f_row(6, "long ok",  htfOkLong  ? "yes" : "no", htfOkLong  ? color.teal : color.red)
+    f_row(7, "short ok", htfOkShort ? "yes" : "no", htfOkShort ? color.teal : color.red)

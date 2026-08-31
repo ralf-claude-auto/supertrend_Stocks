@@ -16,20 +16,25 @@ import pandas as pd
 
 
 @dataclass
-class SuperTrendAIParams:
+class SuperTrendParams:
+    engine: str = "adaptive"      # adaptive | classic
     atr_length: int = 10
+    classic_factor: float = 3.0   # engine="classic" only
     min_mult: float = 1.0
     max_mult: float = 5.0
     step: float = 0.5
     perf_alpha: float = 10.0
     from_cluster: str = "best"  # best | average | worst
     max_iter: int = 1000
-    min_strength: int = 0  # 0-9, 0 = off
 
     @property
     def factors(self) -> np.ndarray:
         n = int(round((self.max_mult - self.min_mult) / self.step)) + 1
         return self.min_mult + self.step * np.arange(n)
+
+
+# Kept so older callers/scripts importing the previous name still work.
+SuperTrendAIParams = SuperTrendParams
 
 
 @dataclass
@@ -117,7 +122,101 @@ def _kmeans_1d(perfs: np.ndarray, factors: np.ndarray, max_iter: int):
     return factor_means, perf_means
 
 
-def supertrend_ai(df: pd.DataFrame, params: SuperTrendAIParams | None = None) -> SuperTrendAIResult:
+def _classic_supertrend(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+                        atr: np.ndarray, factor: float):
+    """Pine's ta.supertrend, step for step.
+
+    Returns (line, direction) where direction is -1 in an uptrend and +1 in a
+    downtrend — the same convention ta.supertrend uses, which the Pine strategy
+    then normalises to os = 1 bullish / 0 bearish.
+
+    Note this band logic is NOT the same as the simpler trailing rule the
+    adaptive factor bank below uses; it is reproduced faithfully so the Classic
+    engine matches what TradingView draws.
+    """
+    n = len(close)
+    hl2 = (high + low) / 2.0
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    line = np.full(n, np.nan)
+    direction = np.zeros(n, dtype=int)
+
+    for i in range(n):
+        if np.isnan(atr[i]):
+            continue
+        ub = hl2[i] + factor * atr[i]
+        lb = hl2[i] - factor * atr[i]
+        prev_upper = upper[i - 1] if i > 0 and not np.isnan(upper[i - 1]) else 0.0
+        prev_lower = lower[i - 1] if i > 0 and not np.isnan(lower[i - 1]) else 0.0
+        c1 = close[i - 1] if i > 0 else np.nan
+
+        lower[i] = lb if (lb > prev_lower or (not np.isnan(c1) and c1 < prev_lower)) else prev_lower
+        upper[i] = ub if (ub < prev_upper or (not np.isnan(c1) and c1 > prev_upper)) else prev_upper
+
+        prev_line = line[i - 1] if i > 0 else np.nan
+        if i == 0 or np.isnan(atr[i - 1]):
+            direction[i] = 1
+        elif not np.isnan(prev_line) and prev_line == prev_upper:
+            direction[i] = -1 if close[i] > upper[i] else 1
+        else:
+            direction[i] = 1 if close[i] < lower[i] else -1
+        line[i] = lower[i] if direction[i] == -1 else upper[i]
+
+    return line, direction
+
+
+def supertrend_classic(df: pd.DataFrame, p: SuperTrendParams) -> SuperTrendAIResult:
+    """Classic SuperTrend at a fixed factor, with the SAME 0-9 signal strength.
+
+    The strength is the identical exponentially weighted directional performance
+    index the adaptive engine publishes, just computed on the single classic
+    line — so `--long-min-strength` means the same thing on both engines and the
+    two are directly comparable.
+    """
+    high = df["High"].to_numpy(dtype=float)
+    low = df["Low"].to_numpy(dtype=float)
+    close = df["Close"].to_numpy(dtype=float)
+    n = len(df)
+
+    atr = _atr(high, low, close, p.atr_length)
+    line, direction = _classic_supertrend(high, low, close, atr, p.classic_factor)
+
+    denom = _ema(np.abs(np.diff(close, prepend=np.nan)), int(p.perf_alpha))
+    alpha_perf = 2.0 / (p.perf_alpha + 1.0)
+    perf = 0.0
+    perf_idx = np.full(n, np.nan)
+    for i in range(n):
+        c1 = close[i - 1] if i > 0 else np.nan
+        l1 = line[i - 1] if i > 0 else np.nan
+        diff = 0.0 if (np.isnan(c1) or np.isnan(l1)) else np.sign(c1 - l1)
+        ret = (close[i] - c1) if not np.isnan(c1) else 0.0
+        perf += alpha_perf * (ret * diff - perf)
+        if not np.isnan(denom[i]) and denom[i]:
+            perf_idx[i] = max(perf, 0.0) / denom[i]
+
+    os_arr = np.where(direction < 0, 1, 0)
+    os_s = pd.Series(os_arr, index=df.index)
+    strength = pd.Series(np.nan_to_num(perf_idx * 10).astype(int), index=df.index).clip(0, 9)
+    return SuperTrendAIResult(
+        trend=os_s,
+        trailing_stop=pd.Series(line, index=df.index),
+        target_factor=pd.Series(p.classic_factor, index=df.index),
+        signal_strength=strength,
+        buy=(os_s == 1) & (os_s.shift(1) == 0),
+        sell=(os_s == 0) & (os_s.shift(1) == 1),
+    )
+
+
+def supertrend(df: pd.DataFrame, p: SuperTrendParams) -> SuperTrendAIResult:
+    """Dispatch to the configured engine."""
+    if p.engine == "classic":
+        return supertrend_classic(df, p)
+    if p.engine == "adaptive":
+        return supertrend_ai(df, p)
+    raise ValueError(f"unknown engine {p.engine!r} (adaptive | classic)")
+
+
+def supertrend_ai(df: pd.DataFrame, params: SuperTrendParams | None = None) -> SuperTrendAIResult:
     """Compute the adaptive SuperTrend on OHLC daily data.
 
     df needs columns: High, Low, Close (index = dates, ascending).
@@ -196,10 +295,10 @@ def supertrend_ai(df: pd.DataFrame, params: SuperTrendAIParams | None = None) ->
 
     os_s = pd.Series(os_arr, index=df.index)
     strength = pd.Series(np.nan_to_num(perf_idx_arr * 10).astype(int), index=df.index).clip(0, 9)
+    # Raw flips only. The strength filter moved to the engine, because long and
+    # short now carry their own minimum and it must not be baked in here.
     buy = (os_s == 1) & (os_s.shift(1) == 0)
     sell = (os_s == 0) & (os_s.shift(1) == 1)
-    if p.min_strength > 0:
-        buy = buy & (strength >= p.min_strength)
 
     return SuperTrendAIResult(
         trend=os_s,
