@@ -93,6 +93,17 @@ actually taken. It reports a profit factor above 5 and means nothing.
 The run also re-tests the trades under a `max_open` position limit, because the
 unconstrained figures assume every signal is funded the instant it fires.
 
+**A slot limit is first-come-first-served, not a ranking.** With `max_open 10` you
+hold the first ten signals that fired, not the ten strongest names. Selecting by
+relative strength instead was tested and is worse: gating on the top half or top
+third of RS lowers average R, total R and drawdown at every cap. At 10 slots,
+first-come gives avg R 0.59 / 372R / -13.2% drawdown against 0.45 / 273R / -20.2%
+for the top-half gate. Rotation - swapping the weakest open position for a
+stronger new signal - earns more total R (571R) only by carrying more risk
+(-19.2%) and far more churn. This matches the earlier result in FINDINGS.md
+section 5b: relative strength is a good way to decide what to LOOK at and a bad
+way to decide what to TRADE.
+
 `backfill_scans.py` writes one CSV per session plus `_signals.csv`, which feeds
 both backtests. Use a long window (`--days 1825`) for the backtests: over 90 days
 most 3:1 trades have not resolved yet, and a trade that has not resolved cannot

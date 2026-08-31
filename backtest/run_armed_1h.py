@@ -39,6 +39,8 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 
 from data import load_daily, load_intraday, parse_watchlist
+from relative_strength import (RsParams, benchmark_for, load_benchmarks,
+                               rs_frame)
 from run_rr import summarise
 from supertrend_ai import SuperTrendParams, supertrend
 
@@ -82,9 +84,14 @@ def main() -> int:
     fee = args.commission / 100.0
     modes = ["daily", "hourly"] if args.stop == "both" else [args.stop]
 
+    rsp = RsParams(mode="roc_diff", roc_length=60)
+    benches = load_benchmarks(tickers, rsp, load_daily, "2022-01-01", None,
+                              args.cache_dir)
+
     print(f"loading {len(tickers)} symbols (daily + 1h)...")
     per_mode = {m: [] for m in modes}
     windows_total = armed_no_entry = 0
+    rs_by_symbol = {}
 
     for t in tickers:
         try:
@@ -94,6 +101,10 @@ def main() -> int:
             continue
         if d.empty or len(d) < args.ma_length + 20 or h.empty:
             continue
+
+        bench = benches.get(benchmark_for(t, rsp))
+        if bench is not None and not bench.empty:
+            rs_by_symbol[t] = rs_frame(d, bench, rsp)["rs_diff"]
 
         hres = supertrend(h, stp)          # the SAME SuperTrend, on 1h bars
         hflip = hres.buy.to_numpy()
@@ -184,32 +195,66 @@ def main() -> int:
     # is ~30% of capital per position - twenty of those is six times the account.
     # Re-run the same trades through a slot limit so the result describes something
     # an account could actually have done.
+    # Cross-sectional relative-strength rank: percentile of each symbol's 60-day
+    # excess return against its benchmark, among the symbols trading that day. This
+    # is what lets "the 10 best RS names" mean anything.
+    rs_wide = pd.DataFrame(rs_by_symbol)
+    rs_rank = rs_wide.rank(axis=1, pct=True).mul(100)
+
+    def rank_at(ticker: str, when) -> float:
+        """RS rank on the last COMPLETED daily bar before this entry."""
+        if ticker not in rs_rank.columns:
+            return np.nan
+        col = rs_rank[ticker].dropna()
+        prior = col[col.index < pd.Timestamp(when).normalize()]
+        return float(prior.iloc[-1]) if len(prior) else np.nan
+
     print("\n=== the same trades under a concurrent-position limit ===")
+    print("FCFS takes whatever fires first. RS-gate only takes names already in the")
+    print("top half / third by relative strength. Rotate lets a stronger signal")
+    print("replace the weakest open position when every slot is full.\n")
     for mode in modes:
         t = pd.DataFrame(per_mode[mode])
         t = t[t.reason != "still open"]
         if t.empty:
             continue
-        t = t.sort_values("entry_date")
+        t = t.sort_values("entry_date").copy()
+        t["rs_rank"] = [rank_at(r.ticker, r.entry_date) for r in t.itertuples()]
+        t.to_csv(out / f"trades_stop_{mode}.csv", index=False, encoding="utf-8")
+
         rows = []
         for cap in (5, 10, 20, 10 ** 9):
-            open_until, taken = [], []
-            for _, r in t.iterrows():
-                open_until = [x for x in open_until if x > r.entry_date]
-                if len(open_until) >= cap:
+            for policy in ("fcfs", "rs50", "rs67", "rotate"):
+                if policy != "fcfs" and cap > 10 ** 8:
+                    continue  # a gate without a slot limit is a different question
+                floor = {"rs50": 50.0, "rs67": 67.0}.get(policy)
+                open_pos, taken = [], []       # open_pos: (exit_date, rs_rank, idx)
+                for i, r in enumerate(t.itertuples()):
+                    open_pos = [p for p in open_pos if p[0] > r.entry_date]
+                    if floor is not None and not (r.rs_rank >= floor):
+                        continue
+                    if len(open_pos) >= cap:
+                        if policy != "rotate" or not np.isfinite(r.rs_rank):
+                            continue
+                        weakest = min(open_pos, key=lambda p: (p[1] if np.isfinite(p[1]) else -1))
+                        if not (r.rs_rank > (weakest[1] if np.isfinite(weakest[1]) else -1)):
+                            continue
+                        open_pos.remove(weakest)   # swap out the weakest name
+                    open_pos.append((r.exit_date, r.rs_rank, i))
+                    taken.append(r)
+                if not taken:
                     continue
-                open_until.append(r.exit_date)
-                taken.append(r)
-            k = pd.DataFrame(taken)
-            eq = (1 + args.risk_frac * k.sort_values("exit_date").R).cumprod()
-            rows.append({"stop": mode,
-                         "max_open": "none" if cap > 10 ** 8 else cap,
-                         "trades": len(k),
-                         "taken_%": round(100 * len(k) / len(t), 1),
-                         "avg_R": round(k.R.mean(), 2),
-                         "total_R": round(k.R.sum(), 1),
-                         "equity_x": round(float(eq.iloc[-1]), 2),
-                         "max_dd_%": round(float((eq / eq.cummax() - 1).min() * 100), 1)})
+                k = pd.DataFrame(taken)
+                eq = (1 + args.risk_frac * k.sort_values("exit_date").R).cumprod()
+                rows.append({"stop": mode,
+                             "max_open": "none" if cap > 10 ** 8 else cap,
+                             "policy": policy,
+                             "trades": len(k),
+                             "taken_%": round(100 * len(k) / len(t), 1),
+                             "avg_R": round(k.R.mean(), 2),
+                             "total_R": round(k.R.sum(), 1),
+                             "equity_x": round(float(eq.iloc[-1]), 2),
+                             "max_dd_%": round(float((eq / eq.cummax() - 1).min() * 100), 1)})
         print(pd.DataFrame(rows).to_string(index=False))
 
     print(f"\nwrote {out}/")
