@@ -1,0 +1,27 @@
+# Shortlist from the 100-config grid of 2026-08-30: profitable in >=70%
+# of configurations. Evidence: analysis/2026-08-30-grid/. Yahoo tickers.
+AMD
+ASML.AS
+BWXT
+DELL
+GE
+HIMS
+HOOD
+IBKR
+MBB.DE
+MRNA
+MSFT
+MU
+NOV.DE
+NVDA
+PLTR
+QQQ
+RDNT
+RHM.DE
+RKLB
+SMCI
+SPY
+SZG.DE
+TSLA
+VERX
+VRSN
