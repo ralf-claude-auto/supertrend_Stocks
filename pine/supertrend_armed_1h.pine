@@ -1,0 +1,228 @@
+//@version=6
+// SuperTrend Armed — daily signal, 1h execution. PUT THIS ON A 1-HOUR CHART.
+//
+// The daily chart decides WHETHER a stock is tradeable; this chart decides WHEN.
+// It is the chart version of backtest/run_armed_1h.py and backtest/paper_log.py.
+//
+//   ARMED    the DAILY SuperTrend is bullish AND the daily close is above the
+//            daily SMA200. Shown as a green background.
+//   ENTRY    the first bullish flip of the 1h SuperTrend while armed. The flip
+//            must come from BELOW - a stock already above the 1h SuperTrend when
+//            it arms produces no entry until it drops back under and crosses up.
+//   STOP     the 1h SuperTrend AT ENTRY. Fixed, it does not trail.
+//   TARGET   entry + RR x risk.
+//   EXIT     stop, target, or disarm - whichever comes first.
+//
+// ── Why the daily values use [1] ───────────────────────────────────────────
+// Every daily series is requested as expr[1], the last CLOSED daily bar. On an
+// intraday chart a plain request would return the DEVELOPING daily bar, which
+// changes as the session goes and is not knowable at the time. That is also what
+// implements "check from the next day": the arming day's own hourly bars cannot
+// see a daily signal that only exists once that day has closed. The Python
+// backtest had exactly this bug and it was worth 14% of its reported profit.
+//
+// ── On the relative-strength RANK ──────────────────────────────────────────
+// The percentile rank in the daily scan is CROSS-SECTIONAL: it compares this
+// symbol against the other ~110 on the watchlist. Pine can only see the symbols
+// it explicitly requests, so a true rank is not computable here. What is shown
+// instead is the raw quantity the rank is computed from - this symbol's 60-day
+// return minus its benchmark's, in percentage points. Positive means it is
+// outperforming. For the rank itself, use scans/<date>.csv.
+
+strategy("SuperTrend Armed — daily signal, 1h entry",
+     overlay              = true,
+     initial_capital      = 100000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 100,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.1,
+     process_orders_on_close = true,
+     calc_on_every_tick   = false,
+     max_labels_count     = 500)
+
+//---------------------------------------------------------------------
+// Inputs
+//---------------------------------------------------------------------
+G_D = "Daily arming"
+dFactor = input.float(3.0, "Daily SuperTrend factor", minval = 0.1, step = 0.1, group = G_D)
+dAtr    = input.int(10,    "Daily ATR length",        minval = 1,  group = G_D)
+dMaLen  = input.int(200,   "Daily MA length",         minval = 1,  group = G_D)
+
+G_H = "Hourly execution"
+hFactor = input.float(3.0, "1h SuperTrend factor", minval = 0.1, step = 0.1, group = G_H)
+hAtr    = input.int(10,    "1h ATR length",        minval = 1,  group = G_H)
+rr      = input.float(3.0, "Reward : risk",        minval = 0.5, step = 0.5, group = G_H)
+
+G_R = "Relative strength"
+rsLen    = input.int(60, "Lookback in daily bars", minval = 5, group = G_R)
+benchDe  = input.symbol("XETR:DAX", "Benchmark for EUR listings", group = G_R)
+benchUs  = input.symbol("AMEX:SPY", "Benchmark for everything else", group = G_R)
+
+G_V = "Display"
+showTable  = input.bool(true,  "Show the status table", group = G_V)
+showLevels = input.bool(true,  "Plot the daily stop and MA", group = G_V)
+showBg     = input.bool(true,  "Shade the armed window", group = G_V)
+// A daily line far below price drags the auto-scale down and squashes the
+// candles into a band - DELL sits 87% above its SMA200, so plotting it flattens
+// the whole chart. Hiding a level until price comes within reach costs nothing:
+// it only matters when it is close, and the exact figure is always in the table.
+maxDist = input.float(25, "Hide daily levels further than this % from price",
+     minval = 1, maxval = 500, step = 5, group = G_V)
+
+//---------------------------------------------------------------------
+// Daily context — every value from the last CLOSED daily bar
+//---------------------------------------------------------------------
+f_daily() =>
+    [line, dir] = ta.supertrend(dFactor, dAtr)
+    ma  = ta.sma(close, dMaLen)
+    roc = ta.roc(close, rsLen)
+    [line[1], dir[1], close[1], ma[1], roc[1]]
+
+[dLine, dDir, dClose, dMa, dRoc] =
+     request.security(syminfo.tickerid, "D", f_daily(), lookahead = barmerge.lookahead_off)
+
+benchSym = syminfo.currency == "EUR" ? benchDe : benchUs
+bRoc = request.security(benchSym, "D", ta.roc(close, rsLen)[1],
+     lookahead = barmerge.lookahead_off)
+
+rsDiff = dRoc - bRoc
+
+// ta.supertrend returns -1 in an uptrend, +1 in a downtrend.
+dBull  = not na(dDir) and dDir < 0
+aboveMa = not na(dMa) and not na(dClose) and dClose > dMa
+armed  = dBull and aboveMa
+justArmed = armed and not armed[1]
+
+// The level at which the position would be disarmed: whichever of the daily
+// SuperTrend and the daily MA is higher, since either one breaking ends it.
+disarmLevel = math.max(nz(dLine, 0), nz(dMa, 0))
+
+//---------------------------------------------------------------------
+// Hourly SuperTrend — the execution trigger
+//---------------------------------------------------------------------
+[hLine, hDir] = ta.supertrend(hFactor, hAtr)
+hBull    = hDir < 0
+hFlipUp  = hBull and not hBull[1]      // must cross from BELOW
+hFlipDn  = not hBull and hBull[1]
+
+//---------------------------------------------------------------------
+// Position management
+//---------------------------------------------------------------------
+var float entryPx  = na
+var float stopPx   = na
+var float targetPx = na
+var int   entryBar = na
+
+flat     = strategy.position_size == 0
+takeLong = armed and hFlipUp and flat
+
+if takeLong
+    entryPx  := close
+    stopPx   := hLine
+    targetPx := close + rr * (close - hLine)
+    entryBar := bar_index
+    strategy.entry("Long", strategy.long)
+
+// Bracket the open position. strategy.exit is re-issued every bar so the levels
+// stay attached; they are fixed values, so this does not trail them.
+if strategy.position_size > 0 and not na(stopPx)
+    strategy.exit("Bracket", "Long", stop = stopPx, limit = targetPx)
+
+// Disarm closes whatever is open, regardless of where the brackets sit.
+if strategy.position_size > 0 and not armed
+    strategy.close("Long", comment = "disarm")
+
+// `and not takeLong` is essential. With process_orders_on_close the entry fills
+// at THIS bar's close, so strategy.position_size is still 0 on the entry bar and
+// only updates next bar. Without the guard this block wipes the entry, stop and
+// target microseconds after they are set, and the table shows "LONG" with NaN
+// everywhere for the life of the trade.
+if strategy.position_size == 0 and not takeLong
+    entryPx  := na
+    stopPx   := na
+    targetPx := na
+
+inPos   = strategy.position_size > 0
+openR   = inPos and not na(entryPx) and entryPx != stopPx ?
+     (close - entryPx) / (entryPx - stopPx) : na
+riskPct = not na(entryPx) and not na(stopPx) and entryPx > 0 ?
+     100 * (entryPx - stopPx) / entryPx : na
+
+//---------------------------------------------------------------------
+// Plots
+//---------------------------------------------------------------------
+bgcolor(showBg and armed ? color.new(color.teal, 92) : na, title = "Armed")
+
+plot(hLine, "1h SuperTrend", color = hBull ? color.new(color.teal, 0) : color.new(color.red, 0),
+     style = plot.style_linebr, linewidth = 2)
+f_near(float lvl) =>
+    // na keeps a level out of the plot AND out of the autoscale.
+    not na(lvl) and close > 0 and 100 * math.abs(close - lvl) / close <= maxDist ? lvl : na
+
+plot(showLevels ? f_near(dLine) : na, "Daily SuperTrend", color = color.new(color.orange, 30),
+     style = plot.style_stepline, linewidth = 2)
+plot(showLevels ? f_near(dMa) : na, "Daily SMA200", color = color.new(color.blue, 40),
+     style = plot.style_stepline, linewidth = 2)
+
+plot(inPos ? entryPx : na,  "Entry",  color = color.new(color.blue, 0),  style = plot.style_linebr)
+plot(inPos ? stopPx : na,   "Stop",   color = color.new(color.red, 0),   style = plot.style_linebr)
+plot(inPos ? targetPx : na, "Target", color = color.new(color.green, 0), style = plot.style_linebr)
+
+plotshape(takeLong, "Entry", shape.labelup, location.belowbar,
+     color.new(color.teal, 0), text = "IN", textcolor = color.white, size = size.tiny)
+// Flips the arming condition rejected — shows what the daily filter is costing.
+plotshape(hFlipUp and not armed, "Blocked (not armed)", shape.xcross, location.belowbar,
+     color.new(color.gray, 45), size = size.tiny)
+plotshape(justArmed, "Armed", shape.triangleup, location.bottom,
+     color.new(color.teal, 20), size = size.tiny)
+
+//---------------------------------------------------------------------
+// Status table
+//---------------------------------------------------------------------
+var table t = table.new(position.top_right, 2, 12, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 60))
+
+// Signs are built by hand throughout: Pine's "+" format flag emits its own
+// plus on top of the minus sign for negatives, giving "-+14.2".
+f_row(int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = color.new(color.gray, 20),
+         text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c, text_size = size.small,
+         text_halign = text.align_right)
+
+// `or barstate.islastconfirmedhistory` matters. With calc_on_every_tick = false a
+// strategy only evaluates confirmed bars, so while a session is OPEN the realtime
+// bar never sets barstate.islast and the table simply does not draw - verified on
+// DELL with the market open. Falling back to the last confirmed bar keeps the
+// dashboard visible intraday without switching on intrabar order fills, which
+// would make the backtest less trustworthy.
+if showTable and (barstate.islast or barstate.islastconfirmedhistory)
+    okC = color.new(color.teal, 0)
+    noC = color.new(color.red, 0)
+    dim = color.new(color.silver, 0)
+
+    f_row(0, "chart TF", timeframe.period + (timeframe.period == "60" ? "" : "  (use 60!)"),
+         timeframe.period == "60" ? dim : noC)
+    f_row(1, "DAILY trend", dBull ? "bullish" : "bearish", dBull ? okC : noC)
+    f_row(2, "daily close vs MA" + str.tostring(dMaLen),
+         str.tostring(nz(dClose), "#.##") + " / " + str.tostring(nz(dMa), "#.##"),
+         aboveMa ? okC : noC)
+    f_row(3, "ARMED", armed ? "YES" : "no", armed ? okC : noC)
+    // Plain "#.#": the "+" format flag emits its own sign on top of the minus
+    // sign for negatives, rendering "-+14.2".
+    f_row(4, "disarm at", str.tostring(disarmLevel, "#.##") + "  (" +
+         str.tostring(100 * (disarmLevel - close) / close, "#.#") + "%)", dim)
+    f_row(5, "1h SuperTrend", str.tostring(hLine, "#.##") +
+         (hBull ? "  bullish" : "  bearish"), hBull ? okC : noC)
+    f_row(6, "RS vs " + benchSym,
+         (rsDiff >= 0 ? "+" : "") + str.tostring(rsDiff, "#.#") + " pts / " + str.tostring(rsLen) + "d",
+         rsDiff >= 0 ? okC : noC)
+    f_row(7, "position", inPos ? "LONG" : (armed ? "waiting for 1h flip" : "flat"),
+         inPos ? okC : dim)
+    f_row(8, "entry",  inPos ? str.tostring(entryPx, "#.##") : "-", dim)
+    f_row(9, "stop",   inPos ? str.tostring(stopPx, "#.##") + "  (-" +
+         str.tostring(riskPct, "#.#") + "%)" : "-", inPos ? noC : dim)
+    f_row(10, "target", inPos ? str.tostring(targetPx, "#.##") + "  (" +
+         str.tostring(rr, "#.#") + "R)" : "-", inPos ? okC : dim)
+    f_row(11, "open R", inPos ? (openR >= 0 ? "+" : "") + str.tostring(openR, "#.##") + "R" : "-",
+         inPos and openR >= 0 ? okC : (inPos ? noC : dim))

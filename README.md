@@ -38,6 +38,33 @@ original long-only rules it adds:
 
 The defaults reproduce the old long-only behaviour, plus the HTF filter.
 
+## 0a. The chart script — `pine/supertrend_armed_1h.pine`
+
+**Put it on a 1-HOUR chart.** It is the chart version of `run_armed_1h.py` and
+`paper_log.py`: the daily chart decides whether a stock is tradeable, the hourly
+chart decides when.
+
+The status table shows, for whatever symbol the chart is on: the daily trend, the
+daily close against the SMA200, whether the stock is ARMED, the level and distance
+at which it would disarm, the 1h SuperTrend state, relative strength against its
+benchmark, and - when in a position - entry, stop, target and open R. The armed
+window is shaded green; grey crosses mark 1h flips the daily filter rejected.
+
+Verified against the Python on NYSE:DELL - entry 411.10, stop 356.27, target
+575.58, daily SuperTrend 397.61, SMA200 243.16, all matching.
+
+Two limitations worth knowing:
+
+- **The RS rank cannot be computed in Pine.** The rank in the daily scan is
+  cross-sectional across the ~110 watchlist symbols, and Pine only sees symbols it
+  explicitly requests. The table shows the quantity the rank is built from - this
+  symbol's 60-day return minus its benchmark's - and picks DAX for EUR listings,
+  SPY otherwise. For the rank itself use `scans/<date>.csv`.
+- **Daily levels are hidden past 25% from price** (`maxDist`). A line far below
+  price drags the auto-scale down and flattens the candles; DELL sits 87% above its
+  SMA200. The exact figure is always in the table, and the line reappears as price
+  approaches - which is when it matters.
+
 ## 0b. Daily scan — new signals, uptrending, downtrending
 
 ```bash
@@ -246,7 +273,8 @@ Data is daily OHLC from Yahoo Finance (auto-adjusted), cached in
 ## Repository layout
 
 ```
-pine/supertrend_mtf_strategy.pine        TradingView strategy (Pine v6) — CURRENT
+pine/supertrend_armed_1h.pine            CURRENT — put on a 1h chart
+pine/supertrend_mtf_strategy.pine        daily long/short with HTF filter (Pine v6)
 pine/supertrend_ai_200ma_strategy.pine   older long-only version (Pine v5)
 backtest/supertrend_ai.py                SuperTrend AI (k-means) indicator port
 backtest/engine.py                       long-only backtest engine
