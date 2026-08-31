@@ -1,0 +1,11 @@
+{
+  "start": "2026-08-31",
+  "equity": 16900.0,
+  "risk_frac": 0.0033,
+  "max_slots": 6,
+  "rr": 3.0,
+  "watchlist": "watchlists/fox.txt",
+  "classic_factor": 3.0,
+  "atr_length": 10,
+  "ma_length": 200
+}

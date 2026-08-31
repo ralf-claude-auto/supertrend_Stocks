@@ -118,6 +118,31 @@ putting all capital into each of many overlapping positions.
 covers roughly two years while `run_rr.py` covers five. It prints a daily
 next-open baseline over the SAME signals so the two are comparable.
 
+## 0d. Paper log — forward testing, no broker
+
+```bash
+.venv/Scripts/python.exe backtest/paper_log.py     # run after the close, daily
+```
+
+First run writes `paper/config.json` and starts the log from that day. Every later
+run replays the whole period and rewrites `paper/log.md`, `open_positions.csv`,
+`trades.csv` and `equity.csv`.
+
+It **replays** rather than keeping a running position file. The strategy is
+deterministic and causal, so replaying the same rules over the same bars always
+reaches the same decisions, and the run is idempotent - execute it twice, or skip
+a week, and the result is identical. A mutable state file would drift on a missed
+or interrupted run.
+
+Positions are sized from current equity: `shares = risk_frac x equity / risk per
+share`, so a 0.33% risk on 16,900 puts about 56 at risk per trade whatever the
+share price. One position per symbol; slots are first-come-first-served.
+
+Nothing here places an order - it produces the list you would place, with share
+counts, stop and target. Use it to build an out-of-sample record before committing
+capital: the backtest is in-sample by construction and its window was a favourable
+one.
+
 ## 1. Backtest inside TradingView (per symbol)
 
 1. Open TradingView, set the chart to **1D**.

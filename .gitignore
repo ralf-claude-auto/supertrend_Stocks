@@ -6,3 +6,6 @@ data_cache/
 results/
 scans/history_5y/2*.csv
 data_cache/intraday/
+paper/open_positions.csv
+paper/trades.csv
+paper/equity.csv
