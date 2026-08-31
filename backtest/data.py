@@ -21,27 +21,58 @@ _EXCHANGE_SUFFIX = {
     # German venues -> XETRA feed on Yahoo
     "XETR": ".DE", "FWB": ".F", "GETTEX": ".DE", "TRADEGATE": ".DE",
     "SWB": ".SG", "HAM": ".HM", "DUS": ".DU", "MUN": ".MU", "BER": ".BE",
+    # Euronext spans Amsterdam/Paris/Brussels/Lisbon and the export does not say
+    # which. Amsterdam (.AS) is the right guess for the names that show up here
+    # (ASML); check any other EURONEXT symbol before trusting its data.
+    "EURONEXT": ".AS",
+    # Deliberately NOT mapped: LSX (Lang & Schwarz). Yahoo has no LSX feed and its
+    # entries are WKN-style codes, so they are reported as unmapped and skipped
+    # rather than silently guessed into a wrong listing.
 }
 
 
+# A plausible Yahoo ticker: letters/digits plus . - ^ = (BRK-B, SAP.DE, ^GDAXI, EURUSD=X)
+_TICKER_RE = re.compile(r"^[A-Za-z0-9^][A-Za-z0-9.\-^=]{0,14}$")
+
+
 def parse_watchlist(path: str | Path) -> list[str]:
-    """Return Yahoo-Finance-style tickers from a watchlist file."""
-    text = Path(path).read_text()
+    """Return Yahoo-Finance-style tickers from a watchlist file.
+
+    Handles both shapes the README documents:
+      - a hand-edited file, where a whole LINE starting with "#" is a comment
+      - a raw TradingView export, which is one long comma-separated line with
+        "###Section" headers sitting INLINE between the symbols
+
+    So "#" comments out a whole line only when the line starts with it; inside a
+    line it only drops the comma-separated chunk it begins. Cutting each line at
+    its first "#" instead swallows every symbol after an inline "###USA" header —
+    on a real export that is three quarters of the list.
+    """
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
     tickers: list[str] = []
-    for chunk in re.split(r"[,\n]", text):
-        item = chunk.strip()
-        if not item or item.startswith("#"):
+    unmapped: set[str] = set()
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
             continue
-        if ":" in item:
-            exchange, symbol = item.split(":", 1)
-            suffix = _EXCHANGE_SUFFIX.get(exchange.upper())
-            if suffix is None:
-                # Unknown exchange: try the raw symbol
-                tickers.append(symbol)
-            else:
-                tickers.append(symbol + suffix)
-        else:
+        for chunk in line.split(","):
+            item = chunk.strip()
+            if not item or item.startswith("#"):
+                continue
+            if ":" in item:
+                exchange, symbol = item.split(":", 1)
+                suffix = _EXCHANGE_SUFFIX.get(exchange.upper())
+                if suffix is None:
+                    # Fall back to the bare symbol, but say so — a bare ticker can
+                    # silently resolve to a DIFFERENT security on another exchange.
+                    unmapped.add(exchange.upper())
+                    suffix = ""
+                item = symbol + suffix
+            if not _TICKER_RE.match(item):
+                continue
             tickers.append(item)
+    if unmapped:
+        print(f"  warning: unmapped exchange prefix(es) {sorted(unmapped)} - those "
+              f"symbols fall back to the bare ticker and may not resolve on Yahoo")
     # de-dupe, keep order
     seen: set[str] = set()
     out = []
@@ -53,7 +84,8 @@ def parse_watchlist(path: str | Path) -> list[str]:
 
 
 def load_daily(ticker: str, start: str | None, end: str | None,
-               cache_dir: str | Path = "data_cache") -> pd.DataFrame:
+               cache_dir: str | Path = "data_cache",
+               stale_after: pd.Timestamp | None = None) -> pd.DataFrame:
     """Daily OHLC for one ticker via yfinance, cached as CSV.
 
     Returns a DataFrame with columns Open, High, Low, Close, Volume and a
@@ -64,8 +96,36 @@ def load_daily(ticker: str, start: str | None, end: str | None,
     safe = ticker.replace("/", "_").replace("^", "_")
     cache_file = cache_dir / f"{safe}.csv"
 
-    if cache_file.exists():
-        df = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+    # The cache is keyed on the ticker alone, so it must record WHICH range it
+    # holds. Without this a short-range fetch silently overwrites a long-range
+    # cache and every later backtest quietly loses its early history — that is
+    # exactly how a 900-day scanner run truncated the benchmarks to 2024 and made
+    # the relative-strength backtests block every entry before then.
+    meta_file = cache_dir / f"{safe}.meta"
+    use_cache = cache_file.exists()
+    if use_cache:
+        try:
+            cached = pd.read_csv(cache_file, index_col=0, parse_dates=True)
+        except Exception:  # noqa: BLE001 - unreadable cache: refetch
+            cached, use_cache = None, False
+
+    if use_cache and stale_after is not None:
+        # A daily scan must not keep reporting last week.
+        last = cached.index.max()
+        use_cache = pd.notna(last) and last >= stale_after
+
+    if use_cache and start is not None and meta_file.exists():
+        # Refetch when this file was built from a LATER start than we now need.
+        # Compared on the requested start, not the first bar present, so a young
+        # listing is not refetched forever just because it IPO'd late.
+        try:
+            prev = pd.Timestamp(meta_file.read_text(encoding="utf-8").strip())
+            use_cache = prev <= pd.Timestamp(start)
+        except Exception:  # noqa: BLE001
+            use_cache = False
+
+    if use_cache:
+        df = cached
     else:
         import yfinance as yf
         df = yf.download(ticker, start=start, end=end, interval="1d",
@@ -76,6 +136,8 @@ def load_daily(ticker: str, start: str | None, end: str | None,
             df.columns = df.columns.get_level_values(0)
         df = df[["Open", "High", "Low", "Close", "Volume"]]
         df.to_csv(cache_file)
+        if start is not None:
+            meta_file.write_text(str(pd.Timestamp(start).date()), encoding="utf-8")
 
     if start:
         df = df[df.index >= pd.Timestamp(start)]
