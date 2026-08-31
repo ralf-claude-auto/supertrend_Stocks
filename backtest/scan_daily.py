@@ -18,8 +18,8 @@ test, 2018+: 74 without it against 70/62/56 with it) — see FINDINGS.md. As a
 sort key for deciding what to look at first, it is exactly the right tool: the
 list is benchmark-relative, so a German and a US name can be compared directly.
 
-The engine defaults to ADAPTIVE (k-means), matching the LuxAlgo "SuperTrend AI
-(Clustering)" indicator on the chart, so the list and the chart agree.
+The engine defaults to CLASSIC factor 3 - the configuration the grid ranked best,
+and what the chart study is set to, so the list and the chart agree.
 
 Data is only as fresh as the last daily close Yahoo has published, which is
 printed in the header. Bars dated today are dropped by default because an open
@@ -52,13 +52,13 @@ def main() -> int:
     ap.add_argument("--watchlist", default="watchlists/fox.txt")
     ap.add_argument("--as-of", default=None,
                     help="run the scan as if it were this date (YYYY-MM-DD)")
-    # Defaults to adaptive because that is what the LuxAlgo "SuperTrend AI
-    # (Clustering)" indicator on the chart computes, and a scan that disagrees with
-    # the chart is worse than no scan. Verified against the chart's own inputs:
-    # ATR 10, factors 1-5 step 0.5, performance memory 10, cluster Best, 1000 iters.
-    # The grid ranked classic factor 3 higher on backtest metrics (FINDINGS.md), so
-    # use --engine classic --classic-factor 3 to scan the backtested configuration.
-    ap.add_argument("--engine", choices=["adaptive", "classic"], default="adaptive")
+    # Classic factor 3 is the configuration the grid ranked best (74/107 symbols in
+    # profit against 60/107 for adaptive - FINDINGS.md section 2), and the chart
+    # study was switched to match it, so list and chart agree. --engine adaptive
+    # reproduces LuxAlgo's "SuperTrend AI (Clustering)" instead; the two disagree by
+    # weeks on individual names (IOS.DE flipped 2026-08-11 adaptive, 2026-08-27
+    # classic 3), so do not mix them.
+    ap.add_argument("--engine", choices=["adaptive", "classic"], default="classic")
     ap.add_argument("--classic-factor", type=float, default=3.0)
     ap.add_argument("--atr-length", type=int, default=10)
     ap.add_argument("--ma-length", type=int, default=200)
