@@ -59,6 +59,11 @@ def main() -> int:
     ap.add_argument("--cache-dir", default="data_cache")
     ap.add_argument("--refresh", action="store_true",
                     help="force a refetch of every symbol, not just the stale ones")
+    ap.add_argument("--include-today", action="store_true",
+                    help="include a bar dated today. OFF by default: while a market "
+                         "is open Yahoo returns a PARTIAL bar for today, and a "
+                         "SuperTrend flip computed on it can vanish by the close. "
+                         "Use only after every market in the list has closed.")
     ap.add_argument("--outdir", default="scans")
     args = ap.parse_args()
 
@@ -76,7 +81,7 @@ def main() -> int:
     # "current" means, and any symbol whose cache ends earlier is refetched. Without
     # this the scan would keep reporting last week's close, since the cache has no
     # notion of age.
-    for name in {benchmark_for(t, rsp) for t in tickers}:
+    for name in {benchmark_for(t, rsp) for t in tickers}:  # noqa: B020
         (Path(args.cache_dir) / f"{name.replace('^', '_')}.csv").unlink(missing_ok=True)
     benches = load_benchmarks(tickers, rsp, load_daily, start, end, args.cache_dir)
 
@@ -101,6 +106,14 @@ def main() -> int:
         if bench is None or bench.empty:
             skipped.append((t, f"benchmark {bench_name} unavailable"))
             continue
+
+        if not args.include_today:
+            # Drop a bar dated today: while the session is open it is incomplete,
+            # so any signal from it can reverse before the close.
+            df = df[df.index.date < date.today()]
+            if df.empty or len(df) < args.ma_length + 20:
+                skipped.append((t, "no completed bars"))
+                continue
 
         res = supertrend(df, stp)
         ma = df["Close"].rolling(args.ma_length).mean()
@@ -144,14 +157,20 @@ def main() -> int:
     d["rs_rank"] = d["rs_diff"].rank(pct=True, ascending=True).mul(100).round(0)
     d = d.sort_values("rs_diff", ascending=False)
 
+    # Symbols do not all end on the same bar: German listings often lag the US
+    # ones by a day on Yahoo. Dating the whole scan by the freshest symbol hides
+    # that, so carry each row's own last bar and flag the ones behind. This has to
+    # happen BEFORE the lists are sliced off, or the slices lack the columns.
+    d["last_bar"] = d["_last_bar"]
+    asof = d["_last_bar"].max()
+    d["stale"] = np.where(d["_last_bar"] < asof, "!", "")
+    cols = ["ticker", "bench", "last_bar", "stale", "close", "rs_diff", "rs_rank",
+            "days_in_trend", "vs_ma_pct", "stop", "stop_dist_pct", "strength"]
+
     new_sig = d[d._new_up & d._above_ma]
     new_exit = d[d._new_down]
     uptrend = d[(d.trend == "up") & d._above_ma & ~d._new_up]
     downtrend = d[(d.trend == "down") | ~d._above_ma]
-
-    cols = ["ticker", "bench", "close", "rs_diff", "rs_rank", "days_in_trend",
-            "vs_ma_pct", "stop", "stop_dist_pct", "strength"]
-    asof = d["_last_bar"].max()
 
     def section(title: str, sub: pd.DataFrame, note: str = "") -> list[str]:
         out = [f"## {title} — {len(sub)}", ""]
@@ -172,6 +191,9 @@ def main() -> int:
         f"percentage points. `rs_rank` is the percentile within this scan.",
         f"- Latest close in the data: **{asof}**. Yahoo publishes end-of-day, so run "
         f"this after the close; intraday it repeats yesterday.",
+        f"- Rows marked `!` in the `stale` column end on an EARLIER bar than {asof} "
+        f"(German listings often lag the US ones by a day on Yahoo) - their signal "
+        f"is that bar's, not today's.",
         "",
         "Every list is sorted by relative strength, strongest first.",
         "",
