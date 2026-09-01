@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from data import load_daily, load_intraday, parse_watchlist
 from relative_strength import (RsParams, benchmark_for, load_benchmarks,
                                rs_frame)
+from htf import _rma
 from run_rr import summarise
 from supertrend_ai import SuperTrendParams, supertrend
 
@@ -120,6 +121,60 @@ def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
     return out
 
 
+
+def rsi_1h(close, length):
+    d = close.diff()
+    return 100 - 100 / (1 + _rma(d.clip(lower=0), length)
+                        / _rma((-d).clip(lower=0), length))
+
+
+def entry_candidates(seg_index, h, hres, mode, prev_day_high=None,
+                     rsi=None, rsi_min=50.0):
+    """Bars inside an armed window at which this entry mode would buy.
+
+    st        a bullish flip of the 1h SuperTrend - it must cross from below, so a
+              stock already above it produces nothing until it drops back under.
+    naive     every bar. With the cursor that follows an exit this means "be in
+              whenever armed", which is the baseline the other modes must beat: if
+              a trigger cannot beat simply holding the armed window, it is costing
+              opportunity rather than adding selectivity.
+    breakout  the first close above the PREVIOUS completed daily high. Enters
+              strength instead of waiting for a turn, so it should miss fewer of
+              the windows that never pull back.
+    st-rsi    a flip, but only when 1h RSI is already above rsi_min - meant to drop
+              the flips that reverse immediately into a stop.
+    """
+    pos = h.index.searchsorted(seg_index)
+    if mode == "naive":
+        return seg_index
+    if mode == "st":
+        return seg_index[hres.buy.to_numpy()[pos]]
+    if mode == "st-rsi":
+        ok = hres.buy.to_numpy()[pos] & (rsi.to_numpy()[pos] >= rsi_min)
+        return seg_index[ok]
+    if mode == "breakout":
+        pdh = prev_day_high.to_numpy()[pos]
+        c = h["Close"].to_numpy()[pos]
+        return seg_index[np.isfinite(pdh) & (c > pdh)]
+    raise ValueError(f"unknown entry mode {mode!r}")
+
+
+def prior_daily_high(d, h):
+    """Previous COMPLETED daily high, aligned onto the hourly bars.
+
+    searchsorted(side="left") counts daily bars strictly before each hourly stamp,
+    so a bar can never see the high of the day it belongs to - that high is not
+    known until the session ends.
+    """
+    idx = h.index.normalize()
+    pos = d.index.searchsorted(idx, side="left") - 1
+    hi = d["High"].to_numpy()
+    out = np.full(len(h), np.nan)
+    ok = pos >= 0
+    out[ok] = hi[pos[ok]]
+    return pd.Series(out, index=h.index)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -141,6 +196,13 @@ def main() -> int:
                     help="arm only when close is this %% ABOVE the fast EMA")
     ap.add_argument("--ema-stacked", action="store_true",
                     help="also require the fast EMA above the slow (tested neutral)")
+    ap.add_argument("--h-factor", type=float, default=3.0,
+                    help="SuperTrend factor on the 1h chart (daily uses --classic-factor)")
+    ap.add_argument("--h-atr", type=int, default=10, help="ATR length on the 1h chart")
+    ap.add_argument("--entry-mode", choices=["st", "naive", "breakout", "st-rsi"],
+                    default="st")
+    ap.add_argument("--rsi-len", type=int, default=14)
+    ap.add_argument("--rsi-min", type=float, default=50.0)
     ap.add_argument("--one-per-window", action="store_true",
                     help="take only the first hourly entry per armed window")
     ap.add_argument("--commission", type=float, default=0.1)
@@ -149,8 +211,10 @@ def main() -> int:
     ap.add_argument("--outdir", default="results/armed_1h")
     args = ap.parse_args()
 
-    stp = SuperTrendParams(engine="classic", classic_factor=args.classic_factor,
-                           atr_length=args.atr_length)
+    stp  = SuperTrendParams(engine="classic", classic_factor=args.classic_factor,
+                            atr_length=args.atr_length)
+    hstp = SuperTrendParams(engine="classic", classic_factor=args.h_factor,
+                            atr_length=args.h_atr)
     tickers = parse_watchlist(args.watchlist)
     fee = args.commission / 100.0
     modes = ["daily", "hourly"] if args.stop == "both" else [args.stop]
@@ -177,8 +241,12 @@ def main() -> int:
         if bench is not None and not bench.empty:
             rs_by_symbol[t] = rs_frame(d, bench, rsp)["rs_diff"]
 
-        hres = supertrend(h, stp)          # the SAME SuperTrend, on 1h bars
-        hflip = hres.buy.to_numpy()
+        # The 1h SuperTrend gets its OWN factor. Sharing the daily one tied the
+        # execution trigger to the trend filter for no reason: a faster line on the
+        # hourly chart flips more often and stops closer, which is a different knob.
+        hres = supertrend(h, hstp)
+        pdh = prior_daily_high(d, h) if args.entry_mode == "breakout" else None
+        hrsi = rsi_1h(h["Close"], args.rsi_len) if args.entry_mode == "st-rsi" else None
         wins = armed_windows(d, stp, args.ma_length, args.arm_mode,
                              args.ema_fast, args.ema_slow, args.ema_buffer,
                              args.ema_entry_buffer, args.ema_stacked)
@@ -198,7 +266,8 @@ def main() -> int:
             seg = h[(h.index.normalize() > arm) & (h.index <= end)]
             if seg.empty:
                 continue
-            flips = seg.index[hflip[h.index.searchsorted(seg.index)]]
+            flips = entry_candidates(seg.index, h, hres, args.entry_mode,
+                                     pdh, hrsi, args.rsi_min)
             if len(flips) == 0:
                 armed_no_entry += 1
                 continue
