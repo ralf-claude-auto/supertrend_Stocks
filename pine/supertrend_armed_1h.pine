@@ -62,12 +62,11 @@ G_V = "Display"
 showTable  = input.bool(true,  "Show the status table", group = G_V)
 showLevels = input.bool(true,  "Plot the daily stop and MA", group = G_V)
 showBg     = input.bool(true,  "Shade the armed window", group = G_V)
-// A daily line far below price drags the auto-scale down and squashes the
-// candles into a band - DELL sits 87% above its SMA200, so plotting it flattens
-// the whole chart. Hiding a level until price comes within reach costs nothing:
-// it only matters when it is close, and the exact figure is always in the table.
-maxDist = input.float(25, "Hide daily levels further than this % from price",
-     minval = 1, maxval = 500, step = 5, group = G_V)
+// Every plot shares the PRICE axis, deliberately. A daily level far below
+// price does compress the candles - DELL sits 87% above its SMA200 - but a
+// level you cannot see is worse than one that is small: the whole point is
+// to read price against the daily context in one glance. Turn the levels off
+// with showLevels if a particular symbol is unreadable.
 
 //---------------------------------------------------------------------
 // Daily context — every value from the last CLOSED daily bar
@@ -155,13 +154,9 @@ bgcolor(showBg and armed ? color.new(color.teal, 92) : na, title = "Armed")
 
 plot(hLine, "1h SuperTrend", color = hBull ? color.new(color.teal, 0) : color.new(color.red, 0),
      style = plot.style_linebr, linewidth = 2)
-f_near(float lvl) =>
-    // na keeps a level out of the plot AND out of the autoscale.
-    not na(lvl) and close > 0 and 100 * math.abs(close - lvl) / close <= maxDist ? lvl : na
-
-plot(showLevels ? f_near(dLine) : na, "Daily SuperTrend", color = color.new(color.orange, 30),
+plot(showLevels ? dLine : na, "Daily SuperTrend", color = color.new(color.orange, 30),
      style = plot.style_stepline, linewidth = 2)
-plot(showLevels ? f_near(dMa) : na, "Daily SMA200", color = color.new(color.blue, 40),
+plot(showLevels ? dMa : na, "Daily SMA200", color = color.new(color.blue, 40),
      style = plot.style_stepline, linewidth = 2)
 
 plot(inPos ? entryPx : na,  "Entry",  color = color.new(color.blue, 0),  style = plot.style_linebr)

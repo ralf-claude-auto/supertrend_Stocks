@@ -60,10 +60,11 @@ Two limitations worth knowing:
   explicitly requests. The table shows the quantity the rank is built from - this
   symbol's 60-day return minus its benchmark's - and picks DAX for EUR listings,
   SPY otherwise. For the rank itself use `scans/<date>.csv`.
-- **Daily levels are hidden past 25% from price** (`maxDist`). A line far below
-  price drags the auto-scale down and flattens the candles; DELL sits 87% above its
-  SMA200. The exact figure is always in the table, and the line reappears as price
-  approaches - which is when it matters.
+- **Everything shares the price axis.** The daily SuperTrend and daily SMA200 are
+  plotted at their real levels, so on a symbol far extended from its MA the candles
+  compress - DELL sits 87% above its SMA200. That is the deliberate trade-off: a
+  level you cannot see is worse than one that is small. Turn the levels off with
+  `showLevels` if a particular symbol is unreadable.
 
 ## 0b. Daily scan — new signals, uptrending, downtrending
 
