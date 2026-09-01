@@ -47,7 +47,7 @@ from supertrend_ai import SuperTrendParams, supertrend
 
 def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
                   mode: str = "supertrend", ema_fast: int = 50, ema_slow: int = 200,
-                  buffer_pct: float = 0.5, entry_buffer_pct: float = 0.5,
+                  buffer_pct: float = 0.0, entry_buffer_pct: float = 0.0,
                   require_stack: bool = False):
     """(arm_date, disarm_date, daily_stop) per armed window.
 
@@ -80,9 +80,15 @@ def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
         # armed time, which is why a wider buffer reduces total return even as it
         # cuts churn - 1% buffer measured 18,040 armed days against 22,507 at zero.
         #
-        # `stacked` (fast EMA above slow) is available but OFF by default: tested at
-        # 1101.6R -> 1011.0R total with identical average R, so it removed ~8% of
-        # trades without improving the rest.
+        # DEFAULTS ARE ZERO. Both buffers were tested and both cost more than they
+        # returned: at -0.5%/+0.5% the gate made 701.6R against 1101.6R unbuffered,
+        # and at 1% only 739.8R. They do buy a calmer equity curve (-17.4% and
+        # -19.8% drawdown against -22.9%), so they are kept as options, but the
+        # plain condition is the better generator and the entry is the thing to fix.
+        #
+        # `stacked` (fast EMA above slow) is likewise OFF: 1101.6R -> 1011.0R with
+        # identical average R, so it removed ~8% of trades without improving the
+        # rest.
         lo = 1.0 - buffer_pct / 100.0
         hi = 1.0 + entry_buffer_pct / 100.0
         stacked = (ef > es) if require_stack else pd.Series(True, index=close.index)
@@ -128,10 +134,10 @@ def main() -> int:
                          "ema: close above BOTH EMAs, no SuperTrend involved")
     ap.add_argument("--ema-fast", type=int, default=50)
     ap.add_argument("--ema-slow", type=int, default=200)
-    ap.add_argument("--ema-buffer", type=float, default=0.5,
+    ap.add_argument("--ema-buffer", type=float, default=0.0,
                     help="stay armed until close is this %% BELOW either EMA "
                          "(0 = disarm on the first tick under)")
-    ap.add_argument("--ema-entry-buffer", type=float, default=0.5,
+    ap.add_argument("--ema-entry-buffer", type=float, default=0.0,
                     help="arm only when close is this %% ABOVE the fast EMA")
     ap.add_argument("--ema-stacked", action="store_true",
                     help="also require the fast EMA above the slow (tested neutral)")
