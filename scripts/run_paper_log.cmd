@@ -1,5 +1,8 @@
 @echo off
-rem Daily routine for Stock_Supertrend, run by the "StockSupertrendPaperLog"
+rem Daily routine for supertrend_Stocks, run by the "StockSupertrendPaperLog"
+rem scheduled task. The task holds an ABSOLUTE path, so if this project is
+rem moved again, repoint it with Set-ScheduledTask or the 07:00 run breaks
+rem silently. This script itself is path-independent (cd /d "%~dp0..").
 rem scheduled task. Register or inspect it with:
 rem   schtasks /query /tn StockSupertrendPaperLog /v /fo list
 rem   schtasks /run   /tn StockSupertrendPaperLog      (run it now)

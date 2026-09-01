@@ -1,4 +1,4 @@
-# Stock_Supertrend — SuperTrend AI + 200 MA Backtest
+# supertrend_Stocks — SuperTrend daily signal, 1h execution
 
 Backtests this daily-timeframe strategy on a TradingView watchlist
 (German + US stocks):
