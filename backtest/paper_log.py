@@ -66,15 +66,21 @@ def load_config(args) -> dict:
             "classic_factor": args.classic_factor,
             "atr_length": args.atr_length,
             "ma_length": args.ma_length,
+            "max_position_pct": args.max_position_pct,
         }
         CFG.parent.mkdir(parents=True, exist_ok=True)
         CFG.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
         print(f"created {CFG} - the log starts {cfg['start']}\n")
     # Explicit flags still override, so settings can be changed deliberately.
     for k, v in (("equity", args.equity), ("risk_frac", args.risk_frac),
-                 ("max_slots", args.max_slots), ("rr", args.rr)):
+                 ("max_slots", args.max_slots), ("rr", args.rr),
+                 ("max_position_pct", args.max_position_pct)):
         if v is not None:
             cfg[k] = v
+    # Persist the derived default so the ceiling is visible and editable in
+    # config.json rather than an invisible fallback in the code.
+    if not cfg.get("max_position_pct"):
+        cfg["max_position_pct"] = round(100.0 / max(cfg["max_slots"], 1), 2)
     return cfg
 
 
@@ -177,13 +183,25 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
     # Size each entry off the equity at that moment, so wins compound.
     eq = float(cfg["equity"])
     curve, rows = [], []
+    # Cap each position's NOTIONAL, not just its risk. Sizing by risk alone means a
+    # tight stop buys a huge position: SIX2.DE's 1.77% stop produced 18.6% of equity
+    # in one name, and six of those would be 112% of capital - on margin without
+    # ever deciding to be. The default ceiling is an equal-weight slice
+    # (100 / max_slots), which guarantees a fully-invested book is never leveraged.
+    # A capped position simply risks less than risk_frac, which is the safe
+    # direction to err.
+    max_pos_pct = cfg.get("max_position_pct") or (100.0 / max(cfg["max_slots"], 1))
     for r in taken.sort_values("entry_time").itertuples():
         shares = int((cfg["risk_frac"] * eq) / r.risk_per_share) if r.risk_per_share > 0 else 0
+        cap_shares = int((max_pos_pct / 100.0 * eq) / r.entry) if r.entry > 0 else 0
+        capped = shares > cap_shares
+        shares = min(shares, cap_shares)
         rec = {
             "ticker": r.ticker, "entry_time": r.entry_time, "entry": round(r.entry, 4),
             "shares": shares, "notional": round(shares * r.entry, 2),
             "stop": round(r.stop, 4), "target": round(r.target, 4),
             "risk_pct": round(r.risk_pct, 2), "risk_eur": round(shares * r.risk_per_share, 2),
+            "capped": capped,
             "reason": r.reason, "rs_diff": r.rs_diff,
             "exit_time": r.exit_time, "exit": None if pd.isna(r.exit) else round(r.exit, 4),
             "R": round((r.mark - r.entry) / r.risk_per_share, 2),
@@ -209,6 +227,9 @@ def main() -> int:
     ap.add_argument("--equity", type=float, default=None, help="starting equity")
     ap.add_argument("--risk-frac", type=float, default=None, help="risk per trade, e.g. 0.0033")
     ap.add_argument("--max-slots", type=int, default=None)
+    ap.add_argument("--max-position-pct", type=float, default=None,
+                    help="ceiling on one position as %% of equity "
+                         "(default: an equal-weight slice, 100 / max_slots)")
     ap.add_argument("--rr", type=float, default=None)
     ap.add_argument("--classic-factor", type=float, default=3.0)
     ap.add_argument("--atr-length", type=int, default=10)
@@ -252,8 +273,9 @@ def main() -> int:
         f"- Rules: daily SuperTrend(classic {cfg['classic_factor']}) arms while above "
         f"SMA{cfg['ma_length']}; entry on a 1h SuperTrend flip; stop at the 1h "
         f"SuperTrend; target {cfg['rr']:g}R; exit on stop, target or disarm",
-        f"- Sizing: {cfg['risk_frac']*100:.2f}% of equity risked per trade, "
-        f"max {cfg['max_slots']} open, first-come-first-served",
+        f"- Sizing: {cfg['risk_frac']*100:.2f}% of equity risked per trade, position "
+        f"capped at {cfg.get('max_position_pct') or (100.0/max(cfg['max_slots'],1)):.1f}% "
+        f"of equity, max {cfg['max_slots']} open, first-come-first-served",
         f"- Starting equity {eq0:,.2f}  ->  realised {eq:,.2f} "
         f"({100*(eq/eq0-1):+.2f}%), open P&L {open_pnl:+,.2f}",
         f"- Closed {len(closed)}"

@@ -7,5 +7,6 @@
   "watchlist": "watchlists/fox.txt",
   "classic_factor": 3.0,
   "atr_length": 10,
-  "ma_length": 200
+  "ma_length": 200,
+  "max_position_pct": 16.67
 }
