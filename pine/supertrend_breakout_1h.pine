@@ -1,0 +1,223 @@
+//@version=6
+// SuperTrend Breakout — EMA gate, prior-high breakout, scale-out. 1-HOUR CHART.
+//
+// The chart version of the configuration the sweeps settled on:
+//
+//   GATE     daily close above BOTH the 50 and 200 EMA. No SuperTrend, no
+//            buffers - both were tested and cost more than they returned.
+//   ENTRY    first 1h close above the PREVIOUS completed daily high, while armed.
+//            Chosen over the 1h SuperTrend flip because it leaves only 8% of
+//            armed windows unused against 36% for the flip.
+//   STOP     the 1h SuperTrend at entry. Wider stops beat tighter ones here: a
+//            2xATR or 2% stop is hit by noise before the move develops.
+//   MANAGE   at +1R the stop moves to breakeven; at +1.5R half the position is
+//            sold and the rest runs on the breakeven stop. That scheme scored
+//            avg 0.93R against 0.74R for a flat 3R exit, and caps the worst trade
+//            at -1.6R against -3.4R.
+//   EXIT     stop, or the gate disarming.
+//
+// RE-ENTRY IS THE POINT. An armed window can produce several breakouts in a row,
+// and the label on each entry carries its number within the window (#1, #2, ...)
+// so the sequence is visible rather than inferred. The table keeps a running
+// count and the per-window record.
+//
+// Daily values are requested as expr[1] - the last CLOSED daily bar - so nothing
+// here can see a level that was not knowable at the time. That also means the
+// breakout level is yesterday's high, held flat across today.
+//
+// Expect the Strategy Tester to differ somewhat from backtest/run_exits.py: the
+// Python model checks the stop before the target within a bar and fills gaps at
+// the open, while Pine applies its own intrabar assumptions.
+
+strategy("SuperTrend Breakout — EMA gate, 1h entry",
+     overlay              = true,
+     initial_capital      = 100000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 100,
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0.1,
+     process_orders_on_close = true,
+     calc_on_every_tick   = false,
+     max_labels_count     = 500,
+     max_boxes_count      = 200)
+
+//---------------------------------------------------------------------
+// Inputs
+//---------------------------------------------------------------------
+G_G = "Daily gate"
+emaFast = input.int(50,  "Fast EMA", minval = 1, group = G_G)
+emaSlow = input.int(200, "Slow EMA", minval = 1, group = G_G)
+
+G_E = "Entry and stop"
+stFactor = input.float(3.0, "1h SuperTrend factor", minval = 0.1, step = 0.1, group = G_E)
+stAtr    = input.int(10,    "1h ATR length", minval = 1, group = G_E)
+minRisk  = input.float(0.3, "Skip entries with a stop nearer than this %", minval = 0.0, step = 0.1, group = G_E)
+
+G_M = "Management"
+beAt     = input.float(1.0, "Move stop to breakeven at (R)", minval = 0.1, step = 0.1, group = G_M)
+partialR = input.float(1.5, "Sell half at (R)", minval = 0.1, step = 0.1, group = G_M)
+partPct  = input.int(50,    "Percent to sell there", minval = 1, maxval = 99, group = G_M)
+
+G_V = "Display"
+showTable = input.bool(true, "Status table", group = G_V)
+showLvls  = input.bool(true, "Entry / stop / target lines", group = G_V)
+showTrig  = input.bool(true, "Breakout level (prior daily high)", group = G_V)
+showBg    = input.bool(true, "Shade the armed window", group = G_V)
+showNums  = input.bool(true, "Number each entry within its window", group = G_V)
+
+//---------------------------------------------------------------------
+// Daily context — last CLOSED daily bar only
+//---------------------------------------------------------------------
+f_daily() =>
+    ef = ta.ema(close, emaFast)
+    es = ta.ema(close, emaSlow)
+    [ef[1], es[1], close[1], high[1]]
+
+[dEf, dEs, dClose, dHigh] =
+     request.security(syminfo.tickerid, "D", f_daily(), lookahead = barmerge.lookahead_off)
+
+armed     = not na(dEf) and not na(dEs) and dClose > dEf and dClose > dEs
+justArmed = armed and not armed[1]
+disarmed  = not armed and armed[1]
+
+//---------------------------------------------------------------------
+// 1h SuperTrend — used for the initial stop, not as the trigger
+//---------------------------------------------------------------------
+[stLine, stDir] = ta.supertrend(stFactor, stAtr)
+
+//---------------------------------------------------------------------
+// State
+//---------------------------------------------------------------------
+var float entryPx  = na
+var float initStop = na
+var float riskPx   = na
+var float targetPx = na
+var bool  halfDone = false
+var int   winCount = 0      // entries so far in the CURRENT armed window
+var int   entryNo   = 0     // number of the entry currently held
+
+if justArmed
+    winCount := 0
+
+flat    = strategy.position_size == 0
+breakout = armed and flat and not na(dHigh) and close > dHigh
+
+// A stop a whisker away makes R meaningless and the position enormous.
+stopOk = not na(stLine) and stLine < close and 100.0 * (close - stLine) / close >= minRisk
+takeLong = breakout and stopOk
+
+if takeLong
+    entryPx  := close
+    initStop := stLine
+    riskPx   := close - stLine
+    targetPx := close + partialR * riskPx
+    halfDone := false
+    winCount := winCount + 1
+    entryNo  := winCount
+    strategy.entry("L", strategy.long)
+
+inPos = strategy.position_size > 0
+
+// Breakeven once the trade has paid for itself, then again after the scale-out.
+beReached = inPos and not na(entryPx) and high >= entryPx + beAt * riskPx
+curStop = inPos ? ((beReached or halfDone) ? math.max(nz(initStop), nz(entryPx)) : initStop) : na
+
+if inPos and not na(curStop)
+    strategy.exit("stop", "L", stop = curStop)
+
+if inPos and not halfDone and not na(targetPx) and high >= targetPx
+    strategy.close("L", qty_percent = partPct, comment = "½ @" + str.tostring(partialR) + "R")
+    halfDone := true
+
+if inPos and not armed
+    strategy.close_all(comment = "disarm")
+
+// Reset once the position is fully closed. The win/loss tally uses Pine's own
+// strategy.wintrades / losstrades rather than a hand-rolled counter: comparing
+// strategy.netprofit at the moment of going flat miscounts every scaled-out
+// trade, because the partial already moved netprofit on an earlier bar. The
+// hand-rolled version read 17/63 against the Strategy Tester's own 55/117.
+if flat and not flat[1]
+    entryPx  := na
+    initStop := na
+    riskPx   := na
+    targetPx := na
+    halfDone := false
+    entryNo  := 0
+
+openR = inPos and not na(entryPx) and riskPx > 0 ? (close - entryPx) / riskPx : na
+
+//---------------------------------------------------------------------
+// Plots — everything on the price axis
+//---------------------------------------------------------------------
+bgcolor(showBg and armed ? color.new(color.teal, 92) : na, title = "Armed")
+
+plot(showTrig ? dHigh : na, "Breakout level (prior daily high)",
+     color = color.new(color.orange, 20), style = plot.style_stepline, linewidth = 2)
+plot(stLine, "1h SuperTrend",
+     color = stDir < 0 ? color.new(color.teal, 40) : color.new(color.red, 40),
+     style = plot.style_linebr)
+
+plot(showLvls and inPos ? entryPx  : na, "Entry",  color = color.new(color.blue, 0),  style = plot.style_linebr, linewidth = 2)
+plot(showLvls and inPos ? curStop  : na, "Stop",   color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 2)
+plot(showLvls and inPos and not halfDone ? targetPx : na, "Half-out target",
+     color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 2)
+
+plotshape(takeLong and not showNums, "Entry", shape.triangleup, location.belowbar,
+     color.new(color.teal, 0), size = size.tiny)
+plotshape(halfDone and not halfDone[1], "Half out", shape.diamond, location.abovebar,
+     color.new(color.green, 0), size = size.tiny)
+plotshape(disarmed, "Disarm", shape.xcross, location.abovebar,
+     color.new(color.gray, 30), size = size.tiny)
+// Breakouts the gate refused - shows what the daily filter is costing.
+plotshape(not armed and flat and not na(dHigh) and close > dHigh and close[1] <= dHigh[1],
+     "Breakout blocked", shape.circle, location.belowbar, color.new(color.gray, 60), size = size.tiny)
+
+if showNums and takeLong
+    label.new(bar_index, low, "#" + str.tostring(winCount),
+         style = label.style_label_up, color = color.new(color.teal, 0),
+         textcolor = color.white, size = size.tiny)
+
+//---------------------------------------------------------------------
+// Status table
+//---------------------------------------------------------------------
+var table t = table.new(position.top_right, 2, 13, border_width = 1,
+     frame_width = 1, frame_color = color.new(color.gray, 60))
+
+f_sign(float v, string fmt) => (v >= 0 ? "+" : "") + str.tostring(v, fmt)
+
+f_row(int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = color.new(color.gray, 20), text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+// islastconfirmedhistory as well as islast: with calc_on_every_tick off the
+// realtime bar never sets islast, so the table would vanish while a market is open.
+if showTable and (barstate.islast or barstate.islastconfirmedhistory)
+    ok  = color.new(color.teal, 0)
+    no  = color.new(color.red, 0)
+    dim = color.new(color.silver, 0)
+    f_row(0,  "chart TF", timeframe.period + (timeframe.period == "60" ? "" : "  (use 60!)"),
+         timeframe.period == "60" ? dim : no)
+    f_row(1,  "daily close", str.tostring(nz(dClose), "#.##"), dim)
+    f_row(2,  "EMA" + str.tostring(emaFast) + " / EMA" + str.tostring(emaSlow),
+         str.tostring(nz(dEf), "#.##") + " / " + str.tostring(nz(dEs), "#.##"), armed ? ok : no)
+    f_row(3,  "ARMED", armed ? "YES" : "no", armed ? ok : no)
+    f_row(4,  "breakout above", str.tostring(nz(dHigh), "#.##") + "  (" +
+         f_sign(100 * (nz(dHigh) - close) / close, "#.#") + "%)", close > nz(dHigh) ? ok : dim)
+    f_row(5,  "1h SuperTrend", str.tostring(nz(stLine), "#.##"), dim)
+    f_row(6,  "entries this window", str.tostring(winCount), winCount > 0 ? ok : dim)
+    f_row(7,  "position", inPos ? ("LONG  #" + str.tostring(entryNo) +
+         (halfDone ? "  (half out)" : "")) : (armed ? "waiting for breakout" : "flat"),
+         inPos ? ok : dim)
+    f_row(8,  "entry",  inPos ? str.tostring(entryPx, "#.##") : "-", dim)
+    f_row(9,  "stop",   inPos ? str.tostring(curStop, "#.##") +
+         (beReached or halfDone ? "  (BE)" : "") : "-", inPos ? no : dim)
+    f_row(10, "half out at", inPos and not halfDone ? str.tostring(targetPx, "#.##") +
+         "  (" + str.tostring(partialR, "#.#") + "R)" : (halfDone ? "done" : "-"),
+         inPos ? ok : dim)
+    f_row(11, "open R", inPos ? f_sign(openR, "#.##") + "R" : "-",
+         inPos and openR >= 0 ? ok : (inPos ? no : dim))
+    f_row(12, "closed W/L", str.tostring(strategy.wintrades) + " / " +
+         str.tostring(strategy.losstrades) + "   PF " +
+         str.tostring(strategy.grossprofit / math.max(strategy.grossloss, 1), "#.##"),
+         strategy.wintrades >= strategy.losstrades ? ok : dim)
