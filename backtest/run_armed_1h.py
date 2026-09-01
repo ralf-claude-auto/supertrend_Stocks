@@ -46,17 +46,17 @@ from supertrend_ai import SuperTrendParams, supertrend
 
 
 def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
-                  mode: str = "supertrend", ema_fast: int = 50, ema_slow: int = 200):
+                  mode: str = "supertrend", ema_fast: int = 50, ema_slow: int = 200,
+                  buffer_pct: float = 0.5, entry_buffer_pct: float = 0.5,
+                  require_stack: bool = False):
     """(arm_date, disarm_date, daily_stop) per armed window.
 
     mode="supertrend"  the daily SuperTrend flips bullish while close > SMA(ma_len).
                        Arming needs a FLIP, so a stock already trending does not
                        re-arm until it breaks and turns again.
-    mode="ema"         close is above BOTH EMAs. There is no flip event here, so a
-                       window opens on the bar the condition becomes true and runs
-                       until either EMA is lost. That is a looser gate by design:
-                       it arms on any reclaim of the two averages, not only after a
-                       SuperTrend turn.
+    mode="ema"         close above both EMAs, and entry_buffer_pct clear of the
+                       fast one. The window is HELD until close falls buffer_pct
+                       below either average. Asymmetric on purpose - see below.
 
     Either way the window ends at the first bar where its condition fails, and the
     daily SuperTrend value at the arm bar is returned for the --stop daily option.
@@ -67,9 +67,29 @@ def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
     if mode == "ema":
         ef = close.ewm(span=ema_fast, adjust=False, min_periods=ema_fast).mean()
         es = close.ewm(span=ema_slow, adjust=False, min_periods=ema_slow).mean()
-        ok = (close > ef) & (close > es)
-        # Arm on the transition into the condition, not on every bar inside it.
-        starts = ok & ~ok.shift(1, fill_value=False)
+        # HYSTERESIS, asymmetric on both sides.
+        #
+        # ENTRY needs close a clear entry_buffer_pct ABOVE the fast EMA, not merely
+        # touching it, so a bar that grazes the average does not arm the stock.
+        # HOLDING tolerates a dip of buffer_pct BELOW either average before
+        # disarming. Without that the gate flickers - at buffer 0 the median armed
+        # window was six days against 33 for the SuperTrend gate.
+        #
+        # The two bands together leave a dead zone: once price falls through the
+        # lower band it cannot re-arm until it clears the upper one. That costs
+        # armed time, which is why a wider buffer reduces total return even as it
+        # cuts churn - 1% buffer measured 18,040 armed days against 22,507 at zero.
+        #
+        # `stacked` (fast EMA above slow) is available but OFF by default: tested at
+        # 1101.6R -> 1011.0R total with identical average R, so it removed ~8% of
+        # trades without improving the rest.
+        lo = 1.0 - buffer_pct / 100.0
+        hi = 1.0 + entry_buffer_pct / 100.0
+        stacked = (ef > es) if require_stack else pd.Series(True, index=close.index)
+        arm_cond  = (close > ef * hi) & (close > es) & stacked
+        hold_cond = (close > ef * lo) & (close > es * lo) & stacked
+        ok = hold_cond
+        starts = arm_cond & ~hold_cond.shift(1, fill_value=False)
     elif mode == "supertrend":
         ma = close.rolling(ma_len).mean()
         ok = (res.trend == 1) & (close > ma)
@@ -78,11 +98,17 @@ def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
         raise ValueError(f"unknown arm mode {mode!r} (supertrend | ema)")
 
     out = []
+    consumed_to = -1
     for i in np.flatnonzero(starts.to_numpy()):
-        # Walk forward to the first bar where the arm condition fails.
+        # With hysteresis the arm condition can go false and true again while the
+        # hold condition never lapses. Skipping starts inside an open window stops
+        # that producing overlapping windows and double entries.
+        if i <= consumed_to:
+            continue
         j = i + 1
         while j < len(df) and bool(ok.iloc[j]):
             j += 1
+        consumed_to = j
         out.append((df.index[i], df.index[j] if j < len(df) else None,
                     float(res.trailing_stop.iloc[i])))
     return out
@@ -102,6 +128,13 @@ def main() -> int:
                          "ema: close above BOTH EMAs, no SuperTrend involved")
     ap.add_argument("--ema-fast", type=int, default=50)
     ap.add_argument("--ema-slow", type=int, default=200)
+    ap.add_argument("--ema-buffer", type=float, default=0.5,
+                    help="stay armed until close is this %% BELOW either EMA "
+                         "(0 = disarm on the first tick under)")
+    ap.add_argument("--ema-entry-buffer", type=float, default=0.5,
+                    help="arm only when close is this %% ABOVE the fast EMA")
+    ap.add_argument("--ema-stacked", action="store_true",
+                    help="also require the fast EMA above the slow (tested neutral)")
     ap.add_argument("--one-per-window", action="store_true",
                     help="take only the first hourly entry per armed window")
     ap.add_argument("--commission", type=float, default=0.1)
@@ -141,7 +174,8 @@ def main() -> int:
         hres = supertrend(h, stp)          # the SAME SuperTrend, on 1h bars
         hflip = hres.buy.to_numpy()
         wins = armed_windows(d, stp, args.ma_length, args.arm_mode,
-                             args.ema_fast, args.ema_slow)
+                             args.ema_fast, args.ema_slow, args.ema_buffer,
+                             args.ema_entry_buffer, args.ema_stacked)
 
         for arm, disarm, dstop in wins:
             # Only windows the hourly history actually covers can be tested.
