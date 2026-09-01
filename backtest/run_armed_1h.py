@@ -45,13 +45,40 @@ from run_rr import summarise
 from supertrend_ai import SuperTrendParams, supertrend
 
 
-def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int):
-    """(arm_date, disarm_date, daily_stop) per window that STARTS with a signal."""
+def armed_windows(df: pd.DataFrame, stp: SuperTrendParams, ma_len: int,
+                  mode: str = "supertrend", ema_fast: int = 50, ema_slow: int = 200):
+    """(arm_date, disarm_date, daily_stop) per armed window.
+
+    mode="supertrend"  the daily SuperTrend flips bullish while close > SMA(ma_len).
+                       Arming needs a FLIP, so a stock already trending does not
+                       re-arm until it breaks and turns again.
+    mode="ema"         close is above BOTH EMAs. There is no flip event here, so a
+                       window opens on the bar the condition becomes true and runs
+                       until either EMA is lost. That is a looser gate by design:
+                       it arms on any reclaim of the two averages, not only after a
+                       SuperTrend turn.
+
+    Either way the window ends at the first bar where its condition fails, and the
+    daily SuperTrend value at the arm bar is returned for the --stop daily option.
+    """
     res = supertrend(df, stp)
-    ma = df["Close"].rolling(ma_len).mean()
-    ok = (res.trend == 1) & (df["Close"] > ma)
+    close = df["Close"]
+
+    if mode == "ema":
+        ef = close.ewm(span=ema_fast, adjust=False, min_periods=ema_fast).mean()
+        es = close.ewm(span=ema_slow, adjust=False, min_periods=ema_slow).mean()
+        ok = (close > ef) & (close > es)
+        # Arm on the transition into the condition, not on every bar inside it.
+        starts = ok & ~ok.shift(1, fill_value=False)
+    elif mode == "supertrend":
+        ma = close.rolling(ma_len).mean()
+        ok = (res.trend == 1) & (close > ma)
+        starts = pd.Series(res.buy.to_numpy() & ok.to_numpy(), index=df.index)
+    else:
+        raise ValueError(f"unknown arm mode {mode!r} (supertrend | ema)")
+
     out = []
-    for i in np.flatnonzero(res.buy.to_numpy() & ok.to_numpy()):
+    for i in np.flatnonzero(starts.to_numpy()):
         # Walk forward to the first bar where the arm condition fails.
         j = i + 1
         while j < len(df) and bool(ok.iloc[j]):
@@ -70,6 +97,11 @@ def main() -> int:
     ap.add_argument("--classic-factor", type=float, default=3.0)
     ap.add_argument("--atr-length", type=int, default=10)
     ap.add_argument("--ma-length", type=int, default=200)
+    ap.add_argument("--arm-mode", choices=["supertrend", "ema"], default="supertrend",
+                    help="supertrend: daily ST flip above the SMA. "
+                         "ema: close above BOTH EMAs, no SuperTrend involved")
+    ap.add_argument("--ema-fast", type=int, default=50)
+    ap.add_argument("--ema-slow", type=int, default=200)
     ap.add_argument("--one-per-window", action="store_true",
                     help="take only the first hourly entry per armed window")
     ap.add_argument("--commission", type=float, default=0.1)
@@ -108,7 +140,8 @@ def main() -> int:
 
         hres = supertrend(h, stp)          # the SAME SuperTrend, on 1h bars
         hflip = hres.buy.to_numpy()
-        wins = armed_windows(d, stp, args.ma_length)
+        wins = armed_windows(d, stp, args.ma_length, args.arm_mode,
+                             args.ema_fast, args.ema_slow)
 
         for arm, disarm, dstop in wins:
             # Only windows the hourly history actually covers can be tested.
