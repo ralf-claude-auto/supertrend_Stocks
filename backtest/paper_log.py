@@ -45,8 +45,7 @@ except Exception:  # noqa: BLE001
     pass
 
 from data import load_daily, load_intraday, parse_watchlist
-from relative_strength import RsParams, benchmark_for, load_benchmarks, rs_frame
-from run_armed_1h import armed_windows
+from run_armed_1h import armed_windows, entry_candidates, prior_daily_high
 from supertrend_ai import SuperTrendParams, supertrend
 
 CFG = Path("paper/config.json")
@@ -61,11 +60,14 @@ def load_config(args) -> dict:
             "equity": args.equity,
             "risk_frac": args.risk_frac,
             "max_slots": args.max_slots,
-            "rr": args.rr,
             "watchlist": args.watchlist,
             "classic_factor": args.classic_factor,
             "atr_length": args.atr_length,
-            "ma_length": args.ma_length,
+            "ema_fast": args.ema_fast,
+            "ema_slow": args.ema_slow,
+            "first_r": args.first_r,
+            "part_pct": args.part_pct,
+            "min_risk_pct": args.min_risk_pct,
             "max_position_pct": args.max_position_pct,
         }
         CFG.parent.mkdir(parents=True, exist_ok=True)
@@ -73,12 +75,22 @@ def load_config(args) -> dict:
         print(f"created {CFG} - the log starts {cfg['start']}\n")
     # Explicit flags still override, so settings can be changed deliberately.
     for k, v in (("equity", args.equity), ("risk_frac", args.risk_frac),
-                 ("max_slots", args.max_slots), ("rr", args.rr),
+                 ("max_slots", args.max_slots),
+                 ("ema_fast", args.ema_fast), ("ema_slow", args.ema_slow),
+                 ("first_r", args.first_r), ("part_pct", args.part_pct),
+                 ("min_risk_pct", args.min_risk_pct),
                  ("max_position_pct", args.max_position_pct)):
         if v is not None:
             cfg[k] = v
     # Persist the derived default so the ceiling is visible and editable in
     # config.json rather than an invisible fallback in the code.
+    # An existing config.json predates the breakout rules and has none of these.
+    # Fill them rather than crash, so the forward record is not restarted.
+    for k, v in (("ema_fast", 50), ("ema_slow", 200), ("first_r", 1.5),
+                 ("part_pct", 50), ("min_risk_pct", 0.3)):
+        cfg.setdefault(k, v)
+    cfg.pop("rr", None)          # the fixed-RR target is gone
+    cfg.pop("ma_length", None)   # so is the daily SMA gate
     if not cfg.get("max_position_pct"):
         cfg["max_position_pct"] = round(100.0 / max(cfg["max_slots"], 1), 2)
     return cfg
@@ -89,17 +101,16 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
                            atr_length=cfg["atr_length"])
     tickers = parse_watchlist(cfg["watchlist"])
     start = pd.Timestamp(cfg["start"])
-    rsp = RsParams(mode="roc_diff", roc_length=60)
-    benches = load_benchmarks(tickers, rsp, load_daily, "2022-01-01", None, cache_dir)
 
     candidates = []
+    part = cfg["part_pct"] / 100.0
     for t in tickers:
         try:
             d = load_daily(t, "2022-01-01", None, cache_dir)
             h = load_intraday(t, "1h")
         except Exception:  # noqa: BLE001
             continue
-        if d.empty or len(d) < cfg["ma_length"] + 20 or h.empty:
+        if d.empty or len(d) < cfg["ema_slow"] + 20 or h.empty:
             continue
         # Completed bars only: an open session gives a partial bar whose signal
         # can vanish by the close.
@@ -108,13 +119,12 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
         if d.empty or h.empty:
             continue
 
-        bench = benches.get(benchmark_for(t, rsp))
-        rs = rs_frame(d, bench, rsp)["rs_diff"] if bench is not None and not bench.empty \
-            else pd.Series(dtype=float)
         hres = supertrend(h, stp)
-        hflip = hres.buy.to_numpy()
+        pdh = prior_daily_high(d, h)
 
-        for arm, disarm, _dstop in armed_windows(d, stp, cfg["ma_length"]):
+        for arm, disarm, _dstop in armed_windows(d, stp, cfg["ema_slow"], "ema",
+                                                 cfg["ema_fast"], cfg["ema_slow"],
+                                                 0.0, 0.0, False):
             end = disarm if disarm is not None else h.index.max()
             if end < start:
                 continue
@@ -124,35 +134,56 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
             seg = h[(h.index.normalize() > arm) & (h.index > start) & (h.index <= end)]
             if seg.empty:
                 continue
-            for ft in seg.index[hflip[h.index.searchsorted(seg.index)]]:
+            for ft in entry_candidates(seg.index, h, hres, "breakout", pdh):
                 entry = float(h.loc[ft, "Close"])
-                stop = float(hres.trailing_stop.loc[ft])
-                if not np.isfinite(stop) or entry <= stop:
+                stop0 = float(hres.trailing_stop.loc[ft])
+                if not np.isfinite(stop0) or entry <= stop0:
                     continue
-                risk = entry - stop
-                target = entry + cfg["rr"] * risk
-                fwd = h[(h.index > ft) & (h.index <= end)]
+                risk = entry - stop0
+                if 100.0 * risk / entry < cfg["min_risk_pct"]:
+                    continue          # same floor the backtest applies
+                scale = entry + cfg["first_r"] * risk
+
+                # Walk the trade exactly as backtest/run_exits.py does for the
+                # scheme that won the sweep - SuperTrend stop, breakeven at 1R,
+                # half out at 1.5R. Same ordering rules, all chosen against the
+                # strategy: the stop is tested BEFORE the target because an hourly
+                # bar does not say which came first, a gap through a level fills at
+                # the open rather than the level, and the breakeven move is applied
+                # only after the bar's own stop test.
+                stop, peak, half = stop0, entry, False
+                banked = 0.0      # per-share P&L already realised on the half
                 xp = xt = None
                 reason = "open"
-                for ts, b in fwd.iterrows():
+                for ts, b in h[(h.index > ft) & (h.index <= end)].iterrows():
                     lo, hi, o = float(b["Low"]), float(b["High"]), float(b["Open"])
                     if lo <= stop:
                         xp, xt, reason = (o if o <= stop else stop), ts, "stop"
                         break
-                    if hi >= target:
-                        xp, xt, reason = (o if o >= target else target), ts, "target"
-                        break
-                if xp is None and disarm is not None and not fwd.empty:
-                    xp, xt, reason = float(fwd.iloc[-1]["Close"]), fwd.index[-1], "disarm"
+                    if not half and hi >= scale:
+                        px = o if o >= scale else scale
+                        banked = part * (px - entry)
+                        half, stop = True, max(stop, entry)
+                    peak = max(peak, hi)
+                    if peak >= entry + risk:
+                        stop = max(stop, entry)
+                fwd_last = h[(h.index > ft) & (h.index <= end)]
+                if xp is None and disarm is not None and not fwd_last.empty:
+                    xp, xt = float(fwd_last.iloc[-1]["Close"]), fwd_last.index[-1]
+                    reason = "disarm"
                 last = float(h["Close"].iloc[-1])
-                rsv = rs[rs.index < ft.normalize()]
+                mark = last if xp is None else xp
+                # Blended per-share result: the half banked at the scale-out plus
+                # the remainder marked or exited. Fractional rather than an integer
+                # share split, which keeps R and P&L consistent with each other.
+                per_share = banked + (1 - part if half else 1.0) * (mark - entry)
                 candidates.append({
                     "ticker": t, "arm_date": arm.date(), "entry_time": ft,
-                    "entry": entry, "stop": stop, "target": target,
+                    "entry": entry, "stop": stop0, "scale_out": scale,
+                    "half_done": half,
                     "risk_per_share": risk, "risk_pct": 100 * risk / entry,
                     "exit_time": xt, "exit": xp, "reason": reason,
-                    "mark": last if xp is None else xp,
-                    "rs_diff": round(float(rsv.iloc[-1]), 1) if len(rsv) else np.nan,
+                    "mark": mark, "per_share": per_share,
                 })
 
     cand = pd.DataFrame(candidates)
@@ -199,13 +230,16 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
         rec = {
             "ticker": r.ticker, "entry_time": r.entry_time, "entry": round(r.entry, 4),
             "shares": shares, "notional": round(shares * r.entry, 2),
-            "stop": round(r.stop, 4), "target": round(r.target, 4),
+            "stop": round(r.stop, 4), "scale_out": round(r.scale_out, 4),
+            "half_done": r.half_done,
             "risk_pct": round(r.risk_pct, 2), "risk_eur": round(shares * r.risk_per_share, 2),
             "capped": capped,
-            "reason": r.reason, "rs_diff": r.rs_diff,
+            "reason": r.reason,
             "exit_time": r.exit_time, "exit": None if pd.isna(r.exit) else round(r.exit, 4),
-            "R": round((r.mark - r.entry) / r.risk_per_share, 2),
-            "pnl": round(shares * (r.mark - r.entry), 2),
+            # R and P&L both come from the blended per-share result, so a trade
+            # that scaled out is not reported as if the whole position ran on.
+            "R": round(r.per_share / r.risk_per_share, 2),
+            "pnl": round(shares * r.per_share, 2),
             "mark": round(r.mark, 4),
         }
         if r.reason != "open":
@@ -230,10 +264,16 @@ def main() -> int:
     ap.add_argument("--max-position-pct", type=float, default=None,
                     help="ceiling on one position as %% of equity "
                          "(default: an equal-weight slice, 100 / max_slots)")
-    ap.add_argument("--rr", type=float, default=None)
+    ap.add_argument("--ema-fast", type=int, default=None)
+    ap.add_argument("--ema-slow", type=int, default=None)
+    ap.add_argument("--first-r", type=float, default=None,
+                    help="scale out half here, in R")
+    ap.add_argument("--part-pct", type=int, default=None,
+                    help="percent of the position sold at --first-r")
+    ap.add_argument("--min-risk-pct", type=float, default=None,
+                    help="skip entries whose stop is nearer than this %% of price")
     ap.add_argument("--classic-factor", type=float, default=3.0)
     ap.add_argument("--atr-length", type=int, default=10)
-    ap.add_argument("--ma-length", type=int, default=200)
     ap.add_argument("--cache-dir", default="data_cache")
     ap.add_argument("--status", action="store_true", help="do not refresh data")
     ap.add_argument("--replay-from", default=None,
@@ -245,7 +285,11 @@ def main() -> int:
         args.equity = args.equity if args.equity is not None else 16900.0
         args.risk_frac = args.risk_frac if args.risk_frac is not None else 0.0033
         args.max_slots = args.max_slots if args.max_slots is not None else 6
-        args.rr = args.rr if args.rr is not None else 3.0
+        args.ema_fast = args.ema_fast if args.ema_fast is not None else 50
+        args.ema_slow = args.ema_slow if args.ema_slow is not None else 200
+        args.first_r = args.first_r if args.first_r is not None else 1.5
+        args.part_pct = args.part_pct if args.part_pct is not None else 50
+        args.min_risk_pct = args.min_risk_pct if args.min_risk_pct is not None else 0.3
     cfg = load_config(args)
     if args.replay_from:
         # A what-if: override the start in memory only. Writing it would silently
@@ -270,9 +314,11 @@ def main() -> int:
     hdr = [
         f"# Paper log — {cfg['start']} to {date.today()}",
         "",
-        f"- Rules: daily SuperTrend(classic {cfg['classic_factor']}) arms while above "
-        f"SMA{cfg['ma_length']}; entry on a 1h SuperTrend flip; stop at the 1h "
-        f"SuperTrend; target {cfg['rr']:g}R; exit on stop, target or disarm",
+        f"- Rules: armed while the daily close is above EMA{cfg['ema_fast']} and "
+        f"EMA{cfg['ema_slow']}; entry on the first 1h close above the previous "
+        f"daily high; stop at the 1h SuperTrend(classic {cfg['classic_factor']}); "
+        f"breakeven at 1R; {cfg['part_pct']}% out at {cfg['first_r']:g}R; exit on "
+        f"stop or disarm",
         f"- Sizing: {cfg['risk_frac']*100:.2f}% of equity risked per trade, position "
         f"capped at {cfg.get('max_position_pct') or (100.0/max(cfg['max_slots'],1)):.1f}% "
         f"of equity, max {cfg['max_slots']} open, first-come-first-served",
@@ -286,7 +332,7 @@ def main() -> int:
         "",
     ]
     cols_o = ["ticker", "entry_time", "entry", "shares", "notional", "stop",
-              "target", "mark", "R", "pnl", "risk_pct", "rs_diff"]
+              "scale_out", "half_done", "mark", "R", "pnl", "risk_pct"]
     hdr += [open_now[cols_o].to_markdown(index=False) if len(open_now) else "_none_", ""]
     hdr += ["## Closed trades", ""]
     cols_c = ["ticker", "entry_time", "exit_time", "reason", "entry", "exit",

@@ -3,10 +3,13 @@
   "equity": 16900.0,
   "risk_frac": 0.0033,
   "max_slots": 6,
-  "rr": 3.0,
   "watchlist": "watchlists/fox.txt",
   "classic_factor": 3.0,
   "atr_length": 10,
-  "ma_length": 200,
+  "ema_fast": 50,
+  "ema_slow": 200,
+  "first_r": 1.5,
+  "part_pct": 50,
+  "min_risk_pct": 0.3,
   "max_position_pct": 16.67
 }

@@ -10,3 +10,7 @@ paper/open_positions.csv
 paper/trades.csv
 paper/equity.csv
 paper/cron.log
+
+# delivery credentials - bot token / app password, never commit
+paper/delivery.json
+reports/

@@ -1,36 +1,46 @@
 #!/usr/bin/env python3
-"""Daily scan: new signals, uptrending and downtrending stocks, ranked by
-relative strength against the DAX (German listings) or SPY (US listings).
+"""Daily scan for the SuperTrend Breakout strategy.
 
     .venv/Scripts/python.exe backtest/scan_daily.py --watchlist watchlists/fox.txt
 
-Lists produced, each sorted by relative strength, strongest first:
+THE STRATEGY, and nothing else. The daily SuperTrend gate, the relative-strength
+ranking and the up/down trend lists that earlier versions of this file produced
+are gone: every one of them was measured and none improved the result, so the
+scan now reports exactly what is traded.
 
-  NEW SIGNAL     SuperTrend flipped bullish on the latest bar with price above
-                 the trend MA — today's fresh entries.
-  NEW EXIT       Flipped bearish on the latest bar — today's exits.
-  UPTRENDING     Already in a bullish SuperTrend above the MA. Positions to hold.
-  DOWNTRENDING   Bearish SuperTrend, or price below the MA.
+  FILTER (daily)  close above BOTH the EMA50 and the EMA200. A stock that clears
+                  it is ARMED. Losing either average disarms it, and that is also
+                  the exit for an open position.
+  TRIGGER (1h)    the first 1h close above the PREVIOUS completed daily high.
+                  Re-entry is allowed while the window stays armed.
+  STOP            the 1h SuperTrend at the moment of entry, fixed.
+  MANAGE          breakeven at 1R, half out at 1.5R, remainder on the breakeven
+                  stop until the gate disarms.
 
-Relative strength is used here to RANK and CLASSIFY, not to gate entries. Tested
-as an entry filter it reduced the number of symbols left in profit (110-symbol
-test, 2018+: 74 without it against 70/62/56 with it) — see FINDINGS.md. As a
-sort key for deciding what to look at first, it is exactly the right tool: the
-list is benchmark-relative, so a German and a US name can be compared directly.
+WHY 07:00 AND WHAT IT SEES. Run at 07:00 local, every session this needs is
+already closed and published: XETRA settled at 17:30 yesterday, New York at 22:00
+yesterday. So both markets contribute a COMPLETE previous-day candle and the two
+lists are computed on the same footing. Any bar dated today is dropped - while a
+market is open Yahoo serves a partial bar, and a gate computed on one can reverse
+by the close.
 
-The engine defaults to CLASSIC factor 3 - the configuration the grid ranked best,
-and what the chart study is set to, so the list and the chart agree.
+That also fixes what "the previous daily high" means. The trigger level published
+this morning is YESTERDAY's high, and it stands all day: it does not creep upward
+as today's session prints. It is the same level the Pine study draws, because the
+study reads the daily series as expr[1] for exactly this reason.
 
-Data is only as fresh as the last daily close Yahoo has published, which is
-printed in the header. Bars dated today are dropped by default because an open
-session yields a partial bar. Run it after the close.
+The stop level shown is an ESTIMATE. The real stop is the 1h SuperTrend at the
+moment of the breakout, which has not happened yet; what is printed is where that
+line sits on the most recent completed 1h bar. It moves during the session. Treat
+it as a size guide, not as an order.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -38,199 +48,238 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from data import load_daily, parse_watchlist
-from relative_strength import RsParams, benchmark_for, load_benchmarks, rs_frame
-from run_backtest import to_markdown_table
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:  # noqa: BLE001
+    pass
+
+from data import load_daily, load_intraday, parse_watchlist
 from supertrend_ai import SuperTrendParams, supertrend
 
-WARMUP_DAYS = 900  # enough for MA200 plus the RS lookback
+WARMUP_DAYS = 500          # EMA200 needs far less, but a long tail costs nothing
+
+# A cache missing the PREVIOUS BUSINESS DAY is refetched. This was four calendar
+# days and that was too loose to be safe: at 07:00 it let a German file that
+# stopped on Monday pass as current on Wednesday, and a gate recomputed on the
+# older bar reported nine spurious DISARMS - which in this report means "exit
+# your position". Anything still behind after the refetch is reported as STALE
+# and kept out of the actionable lists rather than acted on.
+
+
+def gate_frame(d: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
+    c = d["Close"]
+    ef = c.ewm(span=fast, adjust=False).mean()
+    es = c.ewm(span=slow, adjust=False).mean()
+    return pd.DataFrame({"close": c, "ema_fast": ef, "ema_slow": es,
+                         "armed": (c > ef) & (c > es), "high": d["High"]},
+                        index=d.index)
+
+
+def scan_one(t: str, args, stale: pd.Timestamp) -> dict | None:
+    """One symbol's state on the last COMPLETED daily bar."""
+    try:
+        # An explicit start matters. yfinance given start=None returns about a
+        # month, nowhere near the EMA200 warmup, so the first refetch after a
+        # cache went stale would silently drop the symbol out of the scan.
+        d = load_daily(t, args.start, None, args.cache_dir, stale_after=stale)
+    except Exception:  # noqa: BLE001
+        return None
+    if d.empty or len(d) < args.ema_slow + 10:
+        return None
+
+    cutoff = pd.Timestamp(args.as_of) if args.as_of else pd.Timestamp(date.today())
+    d = d[d.index < cutoff]           # never today's partial bar
+    if len(d) < args.ema_slow + 10:
+        return None
+
+    g = gate_frame(d, args.ema_fast, args.ema_slow)
+    last, prev = g.iloc[-1], g.iloc[-2]
+
+    row = {
+        "ticker": t,
+        "session": g.index[-1].date().isoformat(),
+        "close": round(float(last.close), 2),
+        "ema_fast": round(float(last.ema_fast), 2),
+        "ema_slow": round(float(last.ema_slow), 2),
+        "armed": bool(last.armed),
+        "was_armed": bool(prev.armed),
+        # The trigger is yesterday's HIGH and it stands all day.
+        "trigger": round(float(last.high), 2),
+        "to_trigger_pct": round(100 * (last.high - last.close) / last.close, 2),
+        # How much cushion before the gate fails, i.e. how far from an exit.
+        "to_disarm_pct": round(100 * (last.close - max(last.ema_fast, last.ema_slow))
+                               / last.close, 2),
+    }
+    row["state"] = ("NEW ARM"  if row["armed"] and not row["was_armed"] else
+                    "DISARMED" if row["was_armed"] and not row["armed"] else
+                    "ARMED"    if row["armed"] else "flat")
+
+    # The 1h SuperTrend, for an indicative stop and therefore a size. Only worth
+    # downloading for names that are actually armed.
+    row["stop"] = np.nan
+    row["risk_pct"] = np.nan
+    row["st_line"] = np.nan
+    row["note"] = ""
+    if row["armed"]:
+        try:
+            h = load_intraday(t, "1h", cache_dir=args.intraday_dir, stale_after=stale)
+        except Exception:  # noqa: BLE001
+            h = pd.DataFrame()
+        if not h.empty and len(h) > 60:
+            hp = SuperTrendParams(engine="classic", classic_factor=args.h_factor,
+                                  atr_length=args.h_atr)
+            line = supertrend(h, hp).trailing_stop
+            st = float(line.iloc[-1])
+            if np.isfinite(st):
+                row["st_line"] = round(st, 2)
+                if st < row["trigger"]:
+                    row["stop"] = round(st, 2)
+                    row["risk_pct"] = round(
+                        100 * (row["trigger"] - st) / row["trigger"], 2)
+                else:
+                    # Line above price = 1h downtrend. By the time a breakout
+                    # actually fires the line will have flipped below; there is
+                    # simply no long stop to quote this morning.
+                    row["note"] = "1h bearish"
+        else:
+            row["note"] = "no 1h data"
+    return row
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--watchlist", default="watchlists/fox.txt")
-    ap.add_argument("--as-of", default=None,
-                    help="run the scan as if it were this date (YYYY-MM-DD)")
-    # Classic factor 3 is the configuration the grid ranked best (74/107 symbols in
-    # profit against 60/107 for adaptive - FINDINGS.md section 2), and the chart
-    # study was switched to match it, so list and chart agree. --engine adaptive
-    # reproduces LuxAlgo's "SuperTrend AI (Clustering)" instead; the two disagree by
-    # weeks on individual names (IOS.DE flipped 2026-08-11 adaptive, 2026-08-27
-    # classic 3), so do not mix them.
-    ap.add_argument("--engine", choices=["adaptive", "classic"], default="classic")
-    ap.add_argument("--classic-factor", type=float, default=3.0)
-    ap.add_argument("--atr-length", type=int, default=10)
-    ap.add_argument("--ma-length", type=int, default=200)
-    ap.add_argument("--rs-roc-length", type=int, default=60,
-                    help="lookback for the relative-strength ranking")
-    ap.add_argument("--benchmark-de", default="^GDAXI")
-    ap.add_argument("--benchmark-us", default="SPY")
+    ap.add_argument("--as-of", default=None, help="run as if it were this date")
+    ap.add_argument("--ema-fast", type=int, default=50)
+    ap.add_argument("--ema-slow", type=int, default=200)
+    ap.add_argument("--h-factor", type=float, default=3.0)
+    ap.add_argument("--h-atr", type=int, default=10)
+    ap.add_argument("--start", default="2021-01-01",
+                    help="history start, must comfortably cover the slow EMA")
+    ap.add_argument("--min-risk-pct", type=float, default=0.3,
+                    help="skip entries whose stop is nearer than this %% of price")
+    ap.add_argument("--config", default="paper/config.json",
+                    help="equity and risk, for the position-size column")
     ap.add_argument("--cache-dir", default="data_cache")
-    ap.add_argument("--refresh", action="store_true",
-                    help="force a refetch of every symbol, not just the stale ones")
-    ap.add_argument("--include-today", action="store_true",
-                    help="include a bar dated today. OFF by default: while a market "
-                         "is open Yahoo returns a PARTIAL bar for today, and a "
-                         "SuperTrend flip computed on it can vanish by the close. "
-                         "Use only after every market in the list has closed.")
+    ap.add_argument("--intraday-dir", default="data_cache/intraday")
     ap.add_argument("--outdir", default="scans")
     args = ap.parse_args()
 
+    cfg = {}
+    cp = Path(args.config)
+    if cp.exists():
+        cfg = json.loads(cp.read_text(encoding="utf-8"))
+    equity = float(cfg.get("equity", 0) or 0)
+    risk_frac = float(cfg.get("risk_frac", 0) or 0)
+    max_slots = int(cfg.get("max_slots", 0) or 0)
+    max_pos_pct = float(cfg.get("max_position_pct", 100) or 100)
+
+    # Anything whose last bar predates this is refetched rather than trusted. A
+    # scan that silently serves a stale cache is worse than one that fails.
+    ref = pd.Timestamp(args.as_of) if args.as_of else pd.Timestamp(date.today())
+    stale = (ref - pd.tseries.offsets.BDay(1)).normalize()
+
     tickers = parse_watchlist(args.watchlist)
-    rsp = RsParams(mode="roc_diff", roc_length=args.rs_roc_length,
-                   benchmark_de=args.benchmark_de, benchmark_us=args.benchmark_us)
-    stp = SuperTrendParams(engine=args.engine, atr_length=args.atr_length,
-                           classic_factor=args.classic_factor)
-
-    end = args.as_of
-    start = (pd.Timestamp(args.as_of or date.today()) -
-             pd.Timedelta(days=WARMUP_DAYS)).strftime("%Y-%m-%d")
-
-    # Fetch the benchmarks first and unconditionally: their newest bar defines what
-    # "current" means, and any symbol whose cache ends earlier is refetched. Without
-    # this the scan would keep reporting last week's close, since the cache has no
-    # notion of age.
-    for name in {benchmark_for(t, rsp) for t in tickers}:  # noqa: B020
-        (Path(args.cache_dir) / f"{name.replace('^', '_')}.csv").unlink(missing_ok=True)
-    benches = load_benchmarks(tickers, rsp, load_daily, start, end, args.cache_dir)
-
-    fresh = max((b.index.max() for b in benches.values() if not b.empty), default=None)
-    if fresh is not None:
-        print(f"benchmarks current to {fresh.date()} — refetching any symbol older than that")
-    stale_after = None if args.refresh else fresh
-
-    rows, skipped = [], []
+    print(f"scanning {len(tickers)} symbols, gate EMA{args.ema_fast}/EMA{args.ema_slow}...")
+    rows, failed = [], []
     for t in tickers:
-        try:
-            df = load_daily(t, start, end, args.cache_dir,
-                            stale_after=None if args.refresh else stale_after)
-        except Exception as exc:  # noqa: BLE001
-            skipped.append((t, str(exc)[:60]))
+        r = scan_one(t, args, stale)
+        if r is None:
+            failed.append(t)
             continue
-        if df.empty or len(df) < args.ma_length + 20:
-            skipped.append((t, f"only {len(df)} bars"))
-            continue
-        bench_name = benchmark_for(t, rsp)
-        bench = benches.get(bench_name)
-        if bench is None or bench.empty:
-            skipped.append((t, f"benchmark {bench_name} unavailable"))
-            continue
-
-        if not args.include_today:
-            # Drop a bar dated today: while the session is open it is incomplete,
-            # so any signal from it can reverse before the close.
-            df = df[df.index.date < date.today()]
-            if df.empty or len(df) < args.ma_length + 20:
-                skipped.append((t, "no completed bars"))
-                continue
-
-        res = supertrend(df, stp)
-        ma = df["Close"].rolling(args.ma_length).mean()
-        rs = rs_frame(df, bench, rsp)
-
-        i = -1
-        close = float(df["Close"].iloc[i])
-        os_now = int(res.trend.iloc[i])
-        # Bars since the most recent flip, for "how mature is this trend".
-        flips = res.trend.ne(res.trend.shift(1))
-        flips.iloc[0] = True
-        days_in = int(len(res.trend) - 1 - np.max(np.flatnonzero(flips.to_numpy())))
-
-        stop = float(res.trailing_stop.iloc[i])
-        rows.append({
-            "ticker": t,
-            "bench": bench_name,
-            "close": round(close, 2),
-            "rs_diff": round(float(rs["rs_diff"].iloc[i]), 1)
-            if pd.notna(rs["rs_diff"].iloc[i]) else np.nan,
-            "trend": "up" if os_now == 1 else "down",
-            "days_in_trend": days_in,
-            "vs_ma_pct": round(100 * (close / float(ma.iloc[i]) - 1), 1)
-            if pd.notna(ma.iloc[i]) else np.nan,
-            "stop": round(stop, 2) if pd.notna(stop) else np.nan,
-            "stop_dist_pct": round(100 * (close - stop) / close, 1)
-            if pd.notna(stop) else np.nan,
-            "strength": int(res.signal_strength.iloc[i]),
-            "_new_up": bool(res.buy.iloc[i]),
-            "_new_down": bool(res.sell.iloc[i]),
-            "_above_ma": bool(pd.notna(ma.iloc[i]) and close > float(ma.iloc[i])),
-            "_last_bar": df.index[i].date(),
-        })
+        rows.append(r)
 
     if not rows:
-        print("No symbols could be scanned.", file=sys.stderr)
+        print("no symbols returned data")
         return 1
 
-    d = pd.DataFrame(rows)
-    # Rank on benchmark-relative performance, so German and US names compare.
-    d["rs_rank"] = d["rs_diff"].rank(pct=True, ascending=True).mul(100).round(0)
-    d = d.sort_values("rs_diff", ascending=False)
+    df = pd.DataFrame(rows)
+    # "session", not "asof": DataFrame.asof is a method, and a column of
+    # that name is shadowed by it on attribute access.
+    asof = df.session.mode().iat[0]
 
-    # Symbols do not all end on the same bar: German listings often lag the US
-    # ones by a day on Yahoo. Dating the whole scan by the freshest symbol hides
-    # that, so carry each row's own last bar and flag the ones behind. This has to
-    # happen BEFORE the lists are sliced off, or the slices lack the columns.
-    d["last_bar"] = d["_last_bar"]
-    asof = d["_last_bar"].max()
-    d["stale"] = np.where(d["_last_bar"] < asof, "!", "")
-    cols = ["ticker", "bench", "last_bar", "stale", "close", "rs_diff", "rs_rank",
-            "days_in_trend", "vs_ma_pct", "stop", "stop_dist_pct", "strength"]
+    # Any symbol whose newest bar is behind the session most of the watchlist
+    # reached. A holiday on one exchange does this legitimately, so it is not an
+    # error - but its gate was computed on older data, so it must not issue an
+    # instruction. Held out of the actionable lists and reported separately.
+    df["stale"] = df.session < asof
 
-    new_sig = d[d._new_up & d._above_ma]
-    new_exit = d[d._new_down]
-    uptrend = d[(d.trend == "up") & d._above_ma & ~d._new_up]
-    downtrend = d[(d.trend == "down") | ~d._above_ma]
+    # The backtest skips entries whose stop sits nearer than this, because R
+    # divides by that distance and a near-zero one produces a meaningless
+    # multiple and an enormous position. The scan has to apply the same rule or
+    # it would publish trades the tested strategy would never have taken.
+    tight = np.isfinite(df.risk_pct) & (df.risk_pct < args.min_risk_pct)
+    df.loc[tight, "note"] = "stop too tight"
+    df.loc[tight, ["stop", "risk_pct"]] = np.nan
 
-    def section(title: str, sub: pd.DataFrame, note: str = "") -> list[str]:
-        out = [f"## {title} — {len(sub)}", ""]
-        if note:
-            out += [note, ""]
-        out += [to_markdown_table(sub[cols]) if len(sub) else "_none_", ""]
-        return out
+    # Position size, on the indicative stop. Two caps, whichever binds first: the
+    # per-trade risk fraction, and a ceiling on any one position's share of
+    # equity so a very tight stop cannot swallow the account.
+    def size(r):
+        if not (equity > 0 and risk_frac > 0) or not np.isfinite(r.stop):
+            return np.nan
+        risk_per_share = r.trigger - r.stop
+        if risk_per_share <= 0:
+            return np.nan
+        by_risk = equity * risk_frac / risk_per_share
+        by_cap = equity * max_pos_pct / 100.0 / r.trigger
+        return int(min(by_risk, by_cap))
 
-    lines = [
-        f"# Daily scan — {asof}",
-        "",
-        f"- Watchlist: `{args.watchlist}` — {len(d)} symbols scanned, {len(skipped)} skipped",
-        f"- Signal: {args.engine} SuperTrend"
-        + (f" factor {args.classic_factor}" if args.engine == "classic" else "")
-        + f", ATR {args.atr_length}, trend MA{args.ma_length}",
-        f"- Relative strength: {args.rs_roc_length}-day return minus the benchmark's "
-        f"({args.benchmark_de} for German listings, {args.benchmark_us} for US), in "
-        f"percentage points. `rs_rank` is the percentile within this scan.",
-        f"- Latest close in the data: **{asof}**. Yahoo publishes end-of-day, so run "
-        f"this after the close; intraday it repeats yesterday.",
-        f"- Rows marked `!` in the `stale` column end on an EARLIER bar than {asof} "
-        f"(German listings often lag the US ones by a day on Yahoo) - their signal "
-        f"is that bar's, not today's.",
-        "",
-        "Every list is sorted by relative strength, strongest first.",
-        "",
-    ]
-    lines += section("NEW SIGNAL — flipped bullish on the latest bar, above the MA", new_sig)
-    lines += section("NEW EXIT — flipped bearish on the latest bar", new_exit)
-    lines += section("UPTRENDING — holding a bullish SuperTrend above the MA", uptrend)
-    lines += section("DOWNTRENDING — bearish SuperTrend, or below the MA", downtrend)
-    if skipped:
-        lines += ["## Skipped", ""] + [f"- `{t}` — {why}" for t, why in skipped] + [""]
+    df["shares"] = df.apply(size, axis=1)
+    df["cost"] = (df.shares * df.trigger).round(0)
 
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    md = out / f"{asof}.md"
-    md.write_text("\n".join(lines), encoding="utf-8")
-    d[cols + ["trend"]].to_csv(out / f"{asof}.csv", index=False, encoding="utf-8")
+    csv_path = out / f"{asof}.csv"
+    df.sort_values(["state", "to_trigger_pct"]).to_csv(csv_path, index=False,
+                                                       encoding="utf-8")
 
-    print(f"\n=== DAILY SCAN {asof} — {len(d)} symbols ===\n")
-    for title, sub in (("NEW SIGNAL", new_sig), ("NEW EXIT", new_exit)):
-        print(f"{title} ({len(sub)}):")
-        print(sub[cols].to_string(index=False) if len(sub) else "  none")
-        print()
-    print(f"UPTRENDING ({len(uptrend)})  top 15 by relative strength:")
-    print(uptrend[cols].head(15).to_string(index=False))
-    print(f"\nDOWNTRENDING ({len(downtrend)})  weakest 15:")
-    print(downtrend[cols].tail(15).to_string(index=False))
-    print(f"\nWrote {md} and {out / f'{asof}.csv'}")
+    # Stale symbols are held out of every actionable list. Their gate was
+    # computed on older data, so a DISARM from one would be an instruction to
+    # exit a position on evidence that does not exist yet.
+    live = df[~df.stale]
+    new_arm = live[live.state == "NEW ARM"].sort_values("to_trigger_pct")
+    disarm = live[live.state == "DISARMED"].sort_values("ticker")
+    armed = live[live.state == "ARMED"].sort_values("to_trigger_pct")
+    behind = df[df.stale].sort_values(["session", "ticker"])
+
+    print(f"\nsession scanned: {asof}   symbols: {len(df)}"
+          + (f"   no data: {len(failed)}" if failed else ""))
+    print(f"  DISARMED today (exit any open position): {len(disarm)}")
+    print(f"  NEW ARM today:                           {len(new_arm)}")
+    print(f"  already armed and waiting:               {len(armed)}")
+    if len(behind):
+        print(f"  STALE, not actionable:                   {len(behind)}")
+    if max_slots:
+        print(f"  slots: {max_slots}, risk {risk_frac:.2%} of {equity:,.0f}")
+
+    cols = ["ticker", "close", "trigger", "to_trigger_pct", "stop", "risk_pct",
+            "shares", "cost", "to_disarm_pct", "note"]
+    for label, part in (("DISARMED - EXIT", disarm), ("NEW ARM", new_arm),
+                        ("ARMED, WAITING FOR BREAKOUT", armed),
+                        ("STALE - data behind, no instruction", behind)):
+        if part.empty:
+            continue
+        print(f"\n=== {label} ({len(part)}) ===")
+        print(part[cols].to_string(index=False))
+
+    md = out / f"{asof}.md"
+    with md.open("w", encoding="utf-8") as f:
+        f.write(f"# SuperTrend Breakout - scan for {asof}\n\n")
+        f.write(f"Gate: close above EMA{args.ema_fast} and EMA{args.ema_slow}. "
+                f"Trigger: first 1h close above the previous daily high. "
+                f"Stop: 1h SuperTrend({args.h_factor:g}, ATR{args.h_atr}) at entry.\n\n")
+        for label, part in (("Disarmed - exit", disarm), ("New arm", new_arm),
+                            ("Armed, waiting", armed),
+                            ("Stale - data behind, no instruction", behind)):
+            f.write(f"\n## {label} ({len(part)})\n\n")
+            f.write("none\n" if part.empty
+                    else part[cols].to_markdown(index=False) + "\n")
+    print(f"\nwrote {csv_path} and {md}")
+    if failed:
+        print(f"no data for {len(failed)}: {', '.join(failed[:12])}"
+              + (" ..." if len(failed) > 12 else ""))
     return 0
 
 

@@ -111,7 +111,15 @@ def load_daily(ticker: str, start: str | None, end: str | None,
 
     if use_cache and stale_after is not None:
         # A daily scan must not keep reporting last week.
-        last = cached.index.max()
+        #
+        # Compared on the last USABLE bar, not on the raw index. Yahoo sometimes
+        # writes a row for a session it has volume but no prices for - all-NaN
+        # OHLC - and the dropna at the end of this function removes it. Testing
+        # the index alone therefore called such a file fresh and then handed back
+        # data a day older than it claimed, which is exactly how a stale German
+        # cache produced nine phantom DISARMS in the 07:00 scan.
+        usable = cached.dropna(subset=["High", "Low", "Close"])
+        last = usable.index.max() if len(usable) else pd.NaT
         use_cache = pd.notna(last) and last >= stale_after
 
     if use_cache and start is not None and meta_file.exists():
@@ -146,11 +154,17 @@ def load_daily(ticker: str, start: str | None, end: str | None,
     return df.dropna(subset=["High", "Low", "Close"])
 
 def load_intraday(ticker: str, interval: str = "1h", days: int = 720,
-                  cache_dir: str | Path = "data_cache/intraday") -> pd.DataFrame:
+                  cache_dir: str | Path = "data_cache/intraday",
+                  stale_after: pd.Timestamp | None = None) -> pd.DataFrame:
     """Intraday OHLC via yfinance, cached per (ticker, interval).
 
     Yahoo serves at most ~730 days of hourly history, so `days` is clamped: any
     study built on this is bounded by that, not by the daily cache's reach.
+
+    `stale_after` forces a refetch when the cached file's last bar is older than
+    the given timestamp. Without it a cache file, once written, is never renewed -
+    harmless for a backtest over fixed history, silently fatal for a daily run,
+    which would go on reporting last week's stop levels forever.
 
     The index is returned TIMEZONE-NAIVE in the exchange's own local time. Hourly
     bars come back tz-aware (and German and US symbols carry different zones), and
@@ -174,6 +188,12 @@ def load_intraday(ticker: str, interval: str = "1h", days: int = 720,
             # strings, and every later date comparison raises. Refetch and store
             # naive local time instead of trying to repair it.
             df = None
+        elif stale_after is not None:
+            # Last usable bar, for the same reason as load_daily above.
+            u = df.dropna(subset=["High", "Low", "Close"]) if "Close" in df else df
+            lastb = u.index.max() if len(u) else pd.NaT
+            if pd.isna(lastb) or lastb < stale_after:
+                df = None   # cached bars too old for a live scan
 
     if df is None:
         df = yf.download(ticker, period=f"{min(days, 730)}d", interval=interval,

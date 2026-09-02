@@ -1,0 +1,21 @@
+{
+  "_comment": "Copy to paper/delivery.json and fill in. delivery.json is git-ignored and must stay that way - a bot token lets anyone post as the bot, and an app password is a password. This repository is public.",
+
+  "telegram": {
+    "enabled": false,
+    "_setup": "Message @BotFather -> /newbot -> copy the token here. Then send your new bot any message (a bot cannot open the conversation), and run: .venv/Scripts/python.exe backtest/deliver.py --chat-id",
+    "bot_token": "123456789:AAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "chat_id": ""
+  },
+
+  "email": {
+    "enabled": false,
+    "_setup": "Gmail needs an APP PASSWORD (myaccount.google.com/apppasswords), not your account password, and 2FA must be on for app passwords to exist. Port 587 uses STARTTLS, 465 uses SSL.",
+    "smtp_host": "smtp.gmail.com",
+    "smtp_port": 587,
+    "username": "you@example.com",
+    "password": "",
+    "from": "you@example.com",
+    "to": ["ralf@profit-services.com"]
+  }
+}
