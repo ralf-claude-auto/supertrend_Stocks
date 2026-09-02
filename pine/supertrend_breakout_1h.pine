@@ -86,6 +86,7 @@ showState = input.bool(true, "Live state table", group = G_V)
 showCard  = input.bool(true, "Strategy card", group = G_V)
 showLvls  = input.bool(true, "Entry / stop / scale-out lines", group = G_V)
 showTrig  = input.bool(true, "Breakout level", group = G_V)
+showEmas  = input.bool(true, "Daily filter EMAs", group = G_V)
 showBg    = input.bool(true, "Shade armed window", group = G_V)
 showNums  = input.bool(true, "Number each entry", group = G_V)
 showBlock = input.bool(true, "Mark triggers the filter refused", group = G_V)
@@ -173,6 +174,14 @@ riskPct = not na(entryPx) and not na(initStop) and entryPx > 0 ?
 // Plots — all on the price axis
 //=====================================================================
 bgcolor(showBg and armed ? color.new(color.teal, 92) : na, title = "Armed")
+
+// The two averages the filter is actually made of. Daily values on a 1h chart,
+// so they step once per session rather than sloping. Titles say fast/slow rather
+// than 50/200 because a plot title has to be a constant and the lengths are not.
+plot(showEmas ? dEf : na, "Daily fast EMA",
+     color = color.new(color.blue, 20), style = plot.style_stepline, linewidth = 2)
+plot(showEmas ? dEs : na, "Daily slow EMA",
+     color = color.new(color.purple, 20), style = plot.style_stepline, linewidth = 2)
 
 plot(showTrig and useBreakout ? dHigh : na, "Breakout level (prior daily high)",
      color = color.new(color.orange, 20), style = plot.style_stepline, linewidth = 2)
