@@ -20,6 +20,18 @@ rem Mon-Fri. Monday's run covers Friday, Tuesday's covers Monday, and so on.
 
 cd /d "%~dp0.."
 
+rem WHICH UNIVERSE TO SCAN. ranked.txt is the top 40 of the 106 symbols that have
+rem enough history to judge, scored on the last 6 months by backtest/rank_symbols.py.
+rem Set this back to watchlists\fox.txt to scan everything again - that is the only
+rem change needed, nothing else reads this choice.
+rem
+rem The filter is worth roughly +10% at 6 slots and was ahead in 4 walk-forward
+rem cuts out of 6. Real, but modest, and it depends on the slot count: at 4 slots
+rem it is worth nothing, at 10 it was worth +17%. Raise --keep before raising the
+rem slot count, and re-run rank_symbols.py periodically - a list frozen for a year
+rem is a list of symbols that USED to work.
+set WATCHLIST=watchlists\ranked.txt
+
 if not exist ".venv\Scripts\python.exe" (
     echo [%date% %time%] FATAL: .venv missing - run: py -m venv .venv ^&^& .venv\Scripts\python.exe -m pip install -r requirements.txt >> paper\cron.log
     exit /b 1
@@ -31,7 +43,7 @@ echo ===== %date% %time% ===== >> paper\cron.log
 set FAILED=
 
 rem 1. The scan. Refreshes data, applies the gate, writes scans\<session>.csv|md.
-.venv\Scripts\python.exe backtest\scan_daily.py >> paper\cron.log 2>&1
+.venv\Scripts\python.exe backtest\scan_daily.py --watchlist "%WATCHLIST%" >> paper\cron.log 2>&1
 if errorlevel 1 (
     echo [ERROR] scan_daily failed - nothing downstream can be trusted >> paper\cron.log
     set FAILED=1

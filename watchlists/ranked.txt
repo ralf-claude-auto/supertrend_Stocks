@@ -1,0 +1,48 @@
+# Top 40 of 106 rankable symbols, by recent_R.
+# Generated 2026-09-02 from trades through 2026-09-02 by backtest/rank_symbols.py.
+#
+# Ranked on PAST performance, which is only worth doing because the
+# walk-forward test above shows the ranking carries forward. Re-run it
+# after any material change; a list frozen for a year is a list of
+# symbols that USED to work.
+# Unrankable (<5 trades) are excluded, not judged.
+MRNA
+DELL
+AMD
+HPE
+CSCO
+FTNT
+2GB.DE
+MU
+RKLB
+SPY
+ANGO
+QQQ
+SIX2.DE
+IOS.DE
+IBKR
+RTX
+JBL
+NTNX
+AVGO
+GFT.DE
+GE
+NVDA
+EXTR
+AMGN
+DE
+RBC
+LUV
+B
+ABBV
+MTX.DE
+VRSN
+ASML.AS
+IBM
+APH
+TSLA
+AIR.DE
+KO
+CRSP
+DLTR
+EXLS
