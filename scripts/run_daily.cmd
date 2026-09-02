@@ -20,17 +20,24 @@ rem Mon-Fri. Monday's run covers Friday, Tuesday's covers Monday, and so on.
 
 cd /d "%~dp0.."
 
-rem WHICH UNIVERSE TO SCAN. ranked.txt is the top 40 of the 106 symbols that have
-rem enough history to judge, scored on the last 6 months by backtest/rank_symbols.py.
-rem Set this back to watchlists\fox.txt to scan everything again - that is the only
-rem change needed, nothing else reads this choice.
+rem WHICH UNIVERSE TO SCAN. The Nasdaq-100 plus the DAX 40, 136 symbols, each
+rem verified against data by backtest/build_watchlist.py. The alternatives are
+rem watchlists\fox.txt (the original hand-built list) and watchlists\ranked.txt
+rem (a filtered cut of it). This line is the only thing that decides.
 rem
-rem The filter is worth roughly +10% at 6 slots and was ahead in 4 walk-forward
-rem cuts out of 6. Real, but modest, and it depends on the slot count: at 4 slots
-rem it is worth nothing, at 10 it was worth +17%. Raise --keep before raising the
-rem slot count, and re-run rank_symbols.py periodically - a list frozen for a year
-rem is a list of symbols that USED to work.
-set WATCHLIST=watchlists\ranked.txt
+rem Walk-forward at 6 slots, total R captured: this list 528R against fox.txt's
+rem 499R, and 698R once paper_log orders same-day candidates by paper\priority.csv
+rem rather than taking whichever fired first.
+rem
+rem The UNION of both lists was WORSE than either alone - 405R. That is not a
+rem paradox: with far more symbols than slots, first-come-first-served fills the
+rem book with the EARLIEST signal, which says nothing about quality, and then
+rem blocks better ones for days. Widening the universe only pays once the
+rem ordering is fixed, which is what priority.csv does.
+rem
+rem Re-run rank_symbols.py periodically to refresh paper\priority.csv. A ranking
+rem frozen for a year ranks symbols that USED to work.
+set WATCHLIST=watchlists\nq100_dax40.txt
 
 if not exist ".venv\Scripts\python.exe" (
     echo [%date% %time%] FATAL: .venv missing - run: py -m venv .venv ^&^& .venv\Scripts\python.exe -m pip install -r requirements.txt >> paper\cron.log

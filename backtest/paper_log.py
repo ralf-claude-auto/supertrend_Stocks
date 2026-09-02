@@ -191,16 +191,44 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
         return cand, cand, pd.Series(dtype=float)
     cand = cand.sort_values("entry_time").reset_index(drop=True)
 
-    # First-come-first-served slot allocation, chronologically. RS-ranked selection
-    # was tested and is worse on every metric (see README / FINDINGS.md).
+    # Slot allocation, chronologically. Within a single DAY the candidates are
+    # taken best-ranked first rather than in whatever order they happened to
+    # fire, which is what the morning list actually lets you do: you see the
+    # day's names together and choose. Ranks come from paper/priority.csv,
+    # written by backtest/rank_symbols.py; without that file this degrades to
+    # plain first-come-first-served.
     #
-    # One position per symbol at a time. An armed window can produce several 1h
-    # flips while the first is still open, and taking each of them stacks the same
-    # name - a 3-month replay ended up holding SIX2.DE twice, 18% of equity in one
-    # stock. The backtest never did this because it advanced a cursor past each
-    # exit; the same constraint is enforced here explicitly.
+    # This matters more the larger the universe. Walk-forward at 6 slots it was
+    # worth +24R on a 109-symbol list (5 cuts of 6), +170R on the 134-symbol
+    # Nasdaq-100 + DAX list (6 of 6) and +161R on the 220-symbol union (5 of 6).
+    # The reason is mechanical: with more symbols than slots, first-come-first-
+    # served fills the book with whatever fires EARLIEST, which has nothing to do
+    # with whether it is any good, and then blocks better signals for days. On a
+    # small universe there is little to choose between candidates and the effect
+    # nearly vanishes - which is why an early test on the 109-symbol list alone
+    # showed nothing and that reading did not generalise.
+    #
+    # One position per symbol at a time. An armed window can produce several
+    # entries while the first is still open, and taking each of them stacks the
+    # same name - a 3-month replay ended up holding SIX2.DE twice, 18% of equity
+    # in one stock. The backtest never did this because it advanced a cursor past
+    # each exit; the same constraint is enforced here explicitly.
+    prio = {}
+    pf = Path(cfg.get("priority_file") or "paper/priority.csv")
+    if pf.exists():
+        try:
+            p = pd.read_csv(pf)
+            prio = dict(zip(p.iloc[:, 0], p.iloc[:, 1].astype(float)))
+        except Exception:  # noqa: BLE001
+            prio = {}
+    order = cand.assign(
+        _day=cand.entry_time.dt.normalize(),
+        _p=cand.ticker.map(prio).fillna(-1e9),
+    ).sort_values(["_day", "_p"], ascending=[True, False]).index
+
     open_pos, taken_idx = [], []   # open_pos: (exit_time, ticker)
-    for i, r in enumerate(cand.itertuples()):
+    for i in order:
+        r = cand.loc[i]
         open_pos = [p for p in open_pos if pd.isna(p[0]) or p[0] > r.entry_time]
         if any(p[1] == r.ticker for p in open_pos):
             continue
@@ -209,7 +237,7 @@ def simulate(cfg: dict, cache_dir: str, refresh: bool) -> tuple:
         open_pos.append((r.exit_time if pd.notna(r.exit_time) else pd.Timestamp.max,
                          r.ticker))
         taken_idx.append(i)
-    taken = cand.loc[taken_idx].copy()
+    taken = cand.loc[sorted(taken_idx)].copy()
 
     # Size each entry off the equity at that moment, so wins compound.
     eq = float(cfg["equity"])

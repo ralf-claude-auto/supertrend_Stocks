@@ -3,7 +3,7 @@
   "equity": 16900.0,
   "risk_frac": 0.0033,
   "max_slots": 6,
-  "watchlist": "watchlists/ranked.txt",
+  "watchlist": "watchlists/nq100_dax40.txt",
   "classic_factor": 3.0,
   "atr_length": 10,
   "ema_fast": 50,
@@ -11,5 +11,6 @@
   "first_r": 1.5,
   "part_pct": 50,
   "min_risk_pct": 0.3,
-  "max_position_pct": 16.67
+  "max_position_pct": 16.67,
+  "priority_file": "paper/priority.csv"
 }

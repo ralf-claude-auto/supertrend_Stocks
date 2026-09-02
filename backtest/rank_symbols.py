@@ -36,13 +36,30 @@ WHAT THE MEASUREMENTS SAID, so the defaults are not guesses:
     past the point where signals still outnumber slots simply starves them.
   - the gain grows with the slot count: roughly nothing at 4 slots, +37R at 6,
     +128R at 10. With few slots the first decent signal fills them anyway.
-  - taking the best-ranked signal first among those firing on the same DAY,
-    without also filtering, is worth nothing on its own (-17R at 6 slots, ahead
-    in 3 of 6 - a coin flip). Combined with the filter it reached +56R, but on
-    six cuts that is not separable from noise. The filter is doing the work.
-  - expect around +10% at 6 slots, ahead in 4 cuts out of 6. Real, worth having,
-    and far short of transformative. Anyone promising more from a list of past
-    winners is reading a selection effect.
+  - PRIORITY ORDERING is the robust half, and it is worth more than the filter.
+    Taking the best-ranked candidate first among those firing on the same DAY -
+    which is what a morning list lets you do - gained, at 6 slots:
+
+        109-symbol fox list      +24R    ahead in 5 cuts of 6
+        134-symbol NQ100+DAX    +170R    6 of 6
+        220-symbol union        +161R    5 of 6
+
+    Positive on every universe tried, which the filter is not. Measured on the
+    fox list ALONE it looks like nothing, and an early reading here said exactly
+    that; it does not generalise. The effect is mechanical: once symbols
+    outnumber slots, first-come-first-served fills the book with whatever fired
+    EARLIEST - unrelated to whether it was any good - and then blocks better
+    signals for days. A small universe has little to choose between, so the
+    effect nearly vanishes there.
+
+  - the FILTER, by contrast, is universe- and metric-dependent. recent_R keeping
+    40% gained +37R on the fox list but -10R on the index list, where total_R
+    keeping 60% gained +141R instead. Two universes, two different "best"
+    metrics, six cuts each: that is not a stable finding, so do not cut deep on
+    the strength of it. Prioritise confidently; filter cautiously.
+
+  - expect roughly +30% from prioritisation on a full index universe. The filter
+    adds little once ordering is right, and on the index list it subtracted.
 
 A symbol needs --min-trades before it can be ranked at all. Below that, a good
 score is noise: two lucky trades is not evidence, and letting a 2-trade symbol
@@ -71,7 +88,7 @@ from run_armed_1h import armed_windows, entry_candidates, prior_daily_high
 from run_exits import atr_series, simulate
 from supertrend_ai import SuperTrendParams, supertrend
 
-TRADES = Path("results/symbol_trades.csv")
+DEFAULT_TRADES = Path("results/symbol_trades.csv")
 
 
 # --------------------------------------------------------------------------
@@ -122,9 +139,10 @@ def build_trades(args) -> pd.DataFrame:
                 cursor = exit_ts
 
     df = pd.DataFrame(rows).sort_values("entry_time")
-    TRADES.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(TRADES, index=False, encoding="utf-8")
-    print(f"wrote {TRADES}  ({len(df)} trades, {df.ticker.nunique()} symbols)")
+    out = Path(args.trades_file)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out, index=False, encoding="utf-8")
+    print(f"wrote {out}  ({len(df)} trades, {df.ticker.nunique()} symbols)")
     return df
 
 
@@ -258,13 +276,20 @@ def main() -> int:
     ap.add_argument("--first-r", type=float, default=1.5)
     ap.add_argument("--min-risk-pct", type=float, default=0.3)
     ap.add_argument("--cache-dir", default="data_cache")
+    ap.add_argument("--trades-file", default=str(DEFAULT_TRADES),
+                    help="where the replayed trades are cached; give each "
+                         "universe its own file so they can be compared")
+    ap.add_argument("--scorecard", default="results/symbol_scorecard.csv")
+    ap.add_argument("--priority-out", default="paper/priority.csv",
+                    help="ticker,score file that paper_log.py reads to take the "
+                         "best-ranked candidate first among same-day signals")
     args = ap.parse_args()
 
-    if args.build or not TRADES.exists():
+    if args.build or not Path(args.trades_file).exists():
         t = build_trades(args)
     else:
-        t = pd.read_csv(TRADES, parse_dates=["entry_time", "exit_time"])
-        print(f"read {TRADES}  ({len(t)} trades, {t.ticker.nunique()} symbols) "
+        t = pd.read_csv(args.trades_file, parse_dates=["entry_time", "exit_time"])
+        print(f"read {args.trades_file}  ({len(t)} trades, {t.ticker.nunique()} symbols) "
               f"- pass --build to replay")
     if t.empty:
         return 1
@@ -284,7 +309,7 @@ def main() -> int:
     thin = sc[sc.trades < args.min_trades]
 
     Path("results").mkdir(exist_ok=True)
-    ranked.to_csv("results/symbol_scorecard.csv", encoding="utf-8")
+    ranked.to_csv(args.scorecard, encoding="utf-8")
 
     cols = ["trades", "total_R", "avg_R", "win_rate", "recent_R", "recent_n",
             "pos_quarters", "worst", "last_trade"]
@@ -297,6 +322,15 @@ def main() -> int:
         print(f"\n{len(thin)} symbols below --min-trades {args.min_trades}, "
               f"unrankable: {', '.join(thin.index[:15])}"
               + (" ..." if len(thin) > 15 else ""))
+
+    # The priority file paper_log.py reads to order same-day candidates. Written
+    # unconditionally: ordering helped on every universe tested, so there is no
+    # reason to make it opt-in the way the watchlist cut is.
+    pri = ranked[["score"]].copy()
+    pri.index.name = "ticker"
+    pri.to_csv(args.priority_out, encoding="utf-8")
+    print(f"\nwrote {args.priority_out} ({len(pri)} ranked symbols) "
+          f"- paper_log.py uses this to break same-day ties")
 
     if args.write_watchlist:
         keep = list(ranked.head(args.keep).index)
