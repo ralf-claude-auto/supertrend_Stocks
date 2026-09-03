@@ -236,6 +236,10 @@ def main() -> int:
                     help="short by design: it is merged onto the existing history, "
                          "and a shorter window is one cheap request per symbol")
     ap.add_argument("--no-intraday", action="store_true")
+    ap.add_argument("--intraday-only", action="store_true",
+                    help="skip the daily pass. Used for the second phase of the "
+                         "morning run, once the scan has said which symbols are "
+                         "actually armed and therefore need a current stop")
     ap.add_argument("--skip-current", action="store_true",
                     help="skip symbols whose cache already reaches the last "
                          "completed session. Makes a re-run, or a resumed run "
@@ -308,7 +312,7 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             return False
 
-    if args.skip_current:
+    if args.skip_current and not args.intraday_only:
         before = len(tickers)
         tickers = [t for t in tickers if not is_current(t)]
         print(f"--skip-current: {before - len(tickers)} already reach "
@@ -318,10 +322,13 @@ def main() -> int:
         print("nothing to fetch")
         ib.disconnect()
         return 0
-    est = len(tickers) * (1 if args.no_intraday else 2) / 55 * 10
-    print(f"refreshing {len(tickers)} symbols "
-          f"(daily {args.daily_years}"
-          f"{'' if args.no_intraday else f' + 1h {args.intraday_days}'})"
+    per = 0 if args.intraday_only else 1
+    per += 0 if args.no_intraday else 1
+    est = len(tickers) * max(per, 1) / 55 * 10
+    what = ("1h " + args.intraday_days if args.intraday_only else
+            "daily " + args.daily_years +
+            ("" if args.no_intraday else f" + 1h {args.intraday_days}"))
+    print(f"refreshing {len(tickers)} symbols ({what})"
           f" - roughly {est:.0f} min at IB's pacing limit")
     for i, t in enumerate(tickers, 1):
         contract = resolve(ib, t, cache, args.verbose)
@@ -329,19 +336,21 @@ def main() -> int:
             print(f"  [{i:3d}/{len(tickers)}] {t:10s} no IB contract")
             skipped += 1
             continue
+        safe = t.replace("/", "_").replace("^", "_")
         try:
-            # ADJUSTED_LAST to match the adjusted convention the cache is in.
-            bars = fetch(ib, contract, args.daily_years, "1 day",
-                         "ADJUSTED_LAST", pacer)
-            d = bars_to_frame(bars, "Date")
-            if d.empty:
-                print(f"  [{i:3d}/{len(tickers)}] {t:10s} no daily bars")
-                failed += 1
-                continue
-            safe = t.replace("/", "_").replace("^", "_")
-            merged, how = merge_into(DAILY_DIR / f"{safe}.csv", d, "Date")
-            write_daily(t, merged, str(merged.index.min().date()))
-            note = f"daily {len(merged)} to {merged.index.max().date()} ({how})"
+            note = ""
+            if not args.intraday_only:
+                # ADJUSTED_LAST to match the adjusted convention the cache is in.
+                bars = fetch(ib, contract, args.daily_years, "1 day",
+                             "ADJUSTED_LAST", pacer)
+                d = bars_to_frame(bars, "Date")
+                if d.empty:
+                    print(f"  [{i:3d}/{len(tickers)}] {t:10s} no daily bars")
+                    failed += 1
+                    continue
+                merged, how = merge_into(DAILY_DIR / f"{safe}.csv", d, "Date")
+                write_daily(t, merged, str(merged.index.min().date()))
+                note = f"daily {len(merged)} to {merged.index.max().date()} ({how})"
 
             if not args.no_intraday:
                 # Intraday is TRADES only - IB serves no adjusted intraday - so
@@ -354,7 +363,7 @@ def main() -> int:
                     hp = INTRA_DIR / f"{safe}_1h.csv"
                     hm, hhow = merge_into(hp, h, "Datetime")
                     hm.to_csv(hp)
-                    note += f", 1h {len(hm)} to {hm.index.max()} ({hhow})"
+                    note += (", " if note else "") +                         f"1h {len(hm)} to {hm.index.max()} ({hhow})"
             print(f"  [{i:3d}/{len(tickers)}] {t:10s} {note}")
             ok += 1
         except Exception as exc:  # noqa: BLE001

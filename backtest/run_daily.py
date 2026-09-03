@@ -49,6 +49,33 @@ def run(step: str, cmd: list[str]) -> bool:
     return True
 
 
+def wanted_intraday(systems: list[dict]) -> set[str]:
+    """Symbols whose 1h bars are worth a paced request this morning.
+
+    Armed names, because those are the only ones that can be entered today and
+    the stop is quoted from the 1h SuperTrend; plus anything currently held,
+    whose stop has to be tested against bars that actually exist. Everything else
+    on the watchlist cannot trade today, so its hourly series can wait.
+    """
+    import csv
+
+    want: set[str] = set()
+    for s in systems:
+        scans = sorted(Path(ROOT / s["scans"]).glob("20*.csv"))
+        if scans:
+            with scans[-1].open(encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    if row.get("state") in ("ARMED", "NEW ARM"):
+                        want.add(row["ticker"])
+        pos = ROOT / s["dir"] / "open_positions.csv"
+        if pos.exists():
+            with pos.open(encoding="utf-8") as fh:
+                for row in csv.DictReader(fh):
+                    if row.get("ticker"):
+                        want.add(row["ticker"])
+    return want
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -79,34 +106,71 @@ def main() -> int:
     # staleness guard keeps anything too old out of the actionable lists. A
     # missing gateway should degrade the data, not cancel the morning.
     dr = spec.get("data_refresh", {})
-    if dr.get("enabled") and not args.no_refresh:
+    refresh_on = dr.get("enabled") and not args.no_refresh
+
+    def ib(step: str, extra: list[str]) -> bool:
         cmd = ["backtest/ibkr_refresh.py",
                "--host", str(dr.get("host", "127.0.0.1")),
                "--port", str(dr.get("port", 4001)),
                "--client-id", str(dr.get("client_id", 17)),
                "--daily-years", dr.get("daily_years", "3 Y"),
-               "--intraday-days", dr.get("intraday_days", "30 D")]
-        for s in systems:
-            cmd += ["--watchlist", s["watchlist"]]
-        if not run("IB data refresh", cmd):
-            print("[WARN] IB refresh failed - continuing on the existing cache",
-                  flush=True)
-            failed.append("ibkr_refresh")
+               "--intraday-days", dr.get("intraday_days", "30 D")] + extra
+        if run(step, cmd):
+            return True
+        print(f"[WARN] {step} failed - continuing on the existing cache", flush=True)
+        failed.append("ibkr_refresh")
+        return False
+
+    # PHASE 1 - daily bars for every symbol. The gate needs all of them, and
+    # nothing is known about today until it has been computed.
+    if refresh_on:
+        ib("IB daily refresh",
+           ["--no-intraday"] + sum([["--watchlist", s["watchlist"]] for s in systems], []))
+
+    # PHASE 2 - scan, which is what tells us which symbols are actually armed.
+    scanned = []
     for s in systems:
         name, d = s["name"], s["dir"]
-        print(f"\n=========== {name}  ({s['label']}) ===========", flush=True)
-
-        ok = run(f"{name}: scan", [
+        print(f"\n=========== {name}  ({s['label']}) - scan ===========", flush=True)
+        if run(f"{name}: scan", [
             "backtest/scan_daily.py",
             "--watchlist", s["watchlist"],
             "--outdir", s["scans"],
             "--config", f"{d}/config.json",
-        ])
-        if not ok:
+        ]):
+            scanned.append(s)
+        else:
             # Nothing downstream can be trusted without a scan, so skip this book
             # entirely rather than send a report built on yesterday's file.
             failed.append(f"{name}:scan")
-            continue
+
+    # PHASE 3 - hourly bars, but only for symbols that are armed or held. The 1h
+    # series is used for one thing, the stop, and a symbol that is not armed
+    # cannot be entered today - so fetching its hourly bars buys nothing and
+    # costs a paced request. That is ~60 symbols instead of ~235, which is the
+    # difference between a 50-minute morning and an 80-minute one.
+    if refresh_on and scanned:
+        want = wanted_intraday(scanned)
+        if want:
+            print(f"\n[phase 3] {len(want)} symbols armed or held, "
+                  f"fetching their 1h bars", flush=True)
+            ib("IB intraday refresh",
+               ["--intraday-only", "--symbols", ",".join(sorted(want))])
+            # Re-scan so the stops quoted in the report come from the bars just
+            # fetched rather than from yesterday's. No downloads: everything the
+            # scan needs is now cached.
+            for s in scanned:
+                run(f"{s['name']}: rescan on fresh 1h", [
+                    "backtest/scan_daily.py",
+                    "--watchlist", s["watchlist"],
+                    "--outdir", s["scans"],
+                    "--config", f"{s['dir']}/config.json",
+                ])
+
+    # PHASE 4 - the books, reports and delivery.
+    for s in scanned:
+        name, d = s["name"], s["dir"]
+        print(f"\n=========== {name}  ({s['label']}) - report ===========", flush=True)
 
         if not run(f"{name}: paper log", [
             "backtest/paper_log.py",
