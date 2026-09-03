@@ -7,10 +7,12 @@
     "host": "127.0.0.1",
     "port": 4001,
     "client_id": 17,
-    "daily_years": "3 Y",
+    "daily_years": "5 Y",
     "intraday_days": "30 D",
     "skip_current": true,
-    "_skip_current": "Phase 1 fetches only symbols whose cache does not already reach the last completed session. On a 05:30 run nothing does yet, so everything is fetched; on a re-run or after an interruption almost nothing is, which is what makes re-running the morning cheap instead of another 43 minutes."
+    "_skip_current": "Phase 1 fetches only symbols whose cache does not already reach the last completed session. On a 05:30 run nothing does yet, so everything is fetched; on a re-run or after an interruption almost nothing is, which is what makes re-running the morning cheap instead of another 43 minutes.",
+    "daily_what": "TRADES",
+    "_prices": "TRADES, not ADJUSTED_LAST: signals are computed on prices that actually traded, so the gate matches the chart. Dividend adjustment lowers a year of history and the EMA200 with it - HBH.DE reads 80.86 adjusted against 82.66 raw, and the arming decision flips on exactly that. 5 Y so the EMA200 is well converged."
   },
   "systems": [
     {

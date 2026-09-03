@@ -262,6 +262,20 @@ def main() -> int:
                     help="short by design: it is merged onto the existing history, "
                          "and a shorter window is one cheap request per symbol")
     ap.add_argument("--no-intraday", action="store_true")
+    ap.add_argument("--daily-what", default="TRADES",
+                    choices=["TRADES", "ADJUSTED_LAST"],
+                    help="TRADES is what actually traded and what a chart shows. "
+                         "ADJUSTED_LAST back-adjusts for dividends, which drags a "
+                         "year of history down and takes the EMA200 with it - "
+                         "HBH.DE reads 80.86 adjusted against 82.66 raw, and the "
+                         "gate flips on that difference")
+    ap.add_argument("--replace", action="store_true",
+                    help="write IB's series wholesale instead of merging. Needed "
+                         "when CHANGING convention: the merge guard only rejects "
+                         "a splice when the scales differ by more than 2%%, and a "
+                         "small dividend history differs by less - which would "
+                         "leave adjusted history joined to unadjusted recent bars, "
+                         "worse than either on its own")
     ap.add_argument("--intraday-only", action="store_true",
                     help="skip the daily pass. Used for the second phase of the "
                          "morning run, once the scan has said which symbols are "
@@ -394,15 +408,17 @@ def main() -> int:
         try:
             note = ""
             if not args.intraday_only:
-                # ADJUSTED_LAST to match the adjusted convention the cache is in.
                 bars = fetch(ib, contract, args.daily_years, "1 day",
-                             "ADJUSTED_LAST", pacer)
+                             args.daily_what, pacer)
                 d = bars_to_frame(bars, "Date")
                 if d.empty:
                     print(f"  [{i:3d}/{len(tickers)}] {t:10s} no daily bars")
                     failed += 1
                     continue
-                merged, how = merge_into(DAILY_DIR / f"{safe}.csv", d, "Date")
+                if args.replace:
+                    merged, how = d, "replaced"
+                else:
+                    merged, how = merge_into(DAILY_DIR / f"{safe}.csv", d, "Date")
                 write_daily(t, merged, str(merged.index.min().date()))
                 # Only IB's own write counts as provenance.
                 prov_out[t] = str(d.index.max().date())

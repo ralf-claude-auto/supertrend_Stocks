@@ -113,7 +113,8 @@ def main() -> int:
                "--host", str(dr.get("host", "127.0.0.1")),
                "--port", str(dr.get("port", 4001)),
                "--client-id", str(dr.get("client_id", 17)),
-               "--daily-years", dr.get("daily_years", "3 Y"),
+               "--daily-years", dr.get("daily_years", "5 Y"),
+               "--daily-what", dr.get("daily_what", "TRADES"),
                "--intraday-days", dr.get("intraday_days", "30 D")] + extra
         if run(step, cmd):
             return True
