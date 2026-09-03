@@ -63,6 +63,9 @@ CONTRACTS = Path("data_cache/ibkr_contracts.json")
 # it a gateway that quietly logged out overnight looks exactly like a good day:
 # the reports still arrive, on stale numbers, and nothing says so.
 STATUS = Path("data_cache/ibkr_status.json")
+# Which session IB itself last wrote, per symbol. --skip-current consults THIS,
+# never the cache file's own last date - see the note on it below.
+PROVENANCE = Path("data_cache/ibkr_provenance.json")
 DAILY_DIR = Path("data_cache")
 INTRA_DIR = Path("data_cache/intraday")
 
@@ -315,6 +318,12 @@ def main() -> int:
     DAILY_DIR.mkdir(parents=True, exist_ok=True)
     INTRA_DIR.mkdir(parents=True, exist_ok=True)
     pacer = Pacer()
+    prov_out = {}
+    if PROVENANCE.exists():
+        try:
+            prov_out = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            prov_out = {}
     ok = skipped = failed = 0
     started = time.time()
 
@@ -323,15 +332,28 @@ def main() -> int:
     # row can exist with all-NaN prices and be dropped by every reader.
     cutoff = (pd.Timestamp.now().normalize() - pd.tseries.offsets.BDay(1))
 
-    def is_current(t: str) -> bool:
-        safe = t.replace("/", "_").replace("^", "_")
-        f = DAILY_DIR / f"{safe}.csv"
-        if not f.exists():
-            return False
+    prov = {}
+    if PROVENANCE.exists():
         try:
-            df = pd.read_csv(f, index_col=0, parse_dates=True)
-            df = df.dropna(subset=["High", "Low", "Close"])
-            return len(df) > 0 and df.index.max() >= cutoff
+            prov = json.loads(PROVENANCE.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            prov = {}
+
+    def is_current(t: str) -> bool:
+        """Has IB ITSELF written the last completed session for this symbol?
+
+        This deliberately does not look at the cache file's own last date, which
+        is the mistake it replaces. Yahoo writes a row for the session in
+        progress: HBH.DE's 2026-09-02 bar was captured at 16:19, an hour before
+        XETRA closed, and read O83.80 H83.80 L81.60 C82.00 on 4,035 shares
+        against the true O83.80 H83.80 L81.10 C81.30 on 10,354. A date-only test
+        called that current and skipped the symbol, so the whole point of moving
+        to IB was quietly defeated for 230 of 235 names - and a gate computed on
+        a partial close is a gate computed on a price that never happened.
+        """
+        last = prov.get(t)
+        try:
+            return bool(last) and pd.Timestamp(last) >= cutoff
         except Exception:  # noqa: BLE001
             return False
 
@@ -382,6 +404,8 @@ def main() -> int:
                     continue
                 merged, how = merge_into(DAILY_DIR / f"{safe}.csv", d, "Date")
                 write_daily(t, merged, str(merged.index.min().date()))
+                # Only IB's own write counts as provenance.
+                prov_out[t] = str(d.index.max().date())
                 note = f"daily {len(merged)} to {merged.index.max().date()} ({how})"
 
             if not args.no_intraday:
@@ -404,6 +428,7 @@ def main() -> int:
         finally:
             # Written every symbol, so an interrupted run keeps its lookups.
             CONTRACTS.write_text(json.dumps(cache, indent=1), encoding="utf-8")
+            PROVENANCE.write_text(json.dumps(prov_out, indent=1), encoding="utf-8")
 
     ib.disconnect()
     mins = (time.time() - started) / 60
