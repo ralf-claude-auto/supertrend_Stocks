@@ -130,6 +130,8 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--date", default=None)
     ap.add_argument("--reports", default="reports")
+    ap.add_argument("--prefix", default="supertrend",
+                    help="which book's PDF to send; matches report_pdf --prefix")
     ap.add_argument("--scans", default="scans")
     ap.add_argument("--config", default="paper/delivery.json")
     ap.add_argument("--chat-id", action="store_true",
@@ -149,9 +151,9 @@ def main() -> int:
 
     rd = Path(args.reports)
     if args.date:
-        pdf = rd / f"supertrend_{args.date}.pdf"
+        pdf = rd / f"{args.prefix}_{args.date}.pdf"
     else:
-        found = sorted(rd.glob("supertrend_*.pdf"))
+        found = sorted(rd.glob(f"{args.prefix}_*.pdf"))
         if not found:
             print(f"no reports in {rd}")
             return 1
@@ -160,10 +162,10 @@ def main() -> int:
         print(f"no such report: {pdf}")
         return 1
 
-    stamp = pdf.stem.replace("supertrend_", "")
+    stamp = pdf.stem[len(args.prefix) + 1:]
     # A one-line summary in the message body itself, so the counts are visible
     # on a phone without opening the attachment.
-    head = f"SuperTrend Breakout - {stamp}"
+    head = f"SuperTrend Breakout [{args.prefix}] - {stamp}"
     detail = ""
     sc = Path(args.scans) / f"{stamp}.csv"
     if sc.exists():

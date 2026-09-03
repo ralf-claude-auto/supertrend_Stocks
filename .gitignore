@@ -14,3 +14,6 @@ paper/cron.log
 # delivery credentials - bot token / app password, never commit
 paper/delivery.json
 reports/
+
+# retired single-system artefacts
+paper/_retired/

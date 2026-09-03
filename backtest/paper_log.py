@@ -48,10 +48,17 @@ from data import load_daily, load_intraday, parse_watchlist
 from run_armed_1h import armed_windows, entry_candidates, prior_daily_high
 from supertrend_ai import SuperTrendParams, supertrend
 
-CFG = Path("paper/config.json")
+DEFAULT_CFG = Path("paper/config.json")
+
+
+def _cfg_path(args) -> Path:
+    """Where this instance's config lives. Several books run side by side - one
+    per watchlist - so nothing here may assume a single global file."""
+    return Path(getattr(args, "config", None) or DEFAULT_CFG)
 
 
 def load_config(args) -> dict:
+    CFG = _cfg_path(args)
     if CFG.exists():
         cfg = json.loads(CFG.read_text(encoding="utf-8"))
     else:
@@ -308,7 +315,13 @@ def main() -> int:
                     help="answer 'what would be open now if I had started on DATE' "
                          "without touching the saved config or the live log")
     ap.add_argument("--outdir", default="paper")
+    ap.add_argument("--config", default=str(DEFAULT_CFG),
+                    help="this book's config.json. Each system gets its own, so "
+                         "two universes can be tracked as separate books")
+    ap.add_argument("--label", default=None,
+                    help="name for this book, used in the report header")
     args = ap.parse_args()
+    CFG = _cfg_path(args)
     if not CFG.exists():
         args.equity = args.equity if args.equity is not None else 16900.0
         args.risk_frac = args.risk_frac if args.risk_frac is not None else 0.0033
@@ -339,8 +352,9 @@ def main() -> int:
     open_pnl = float(open_now.pnl.sum()) if len(open_now) else 0.0
     wins = closed[closed.R > 0] if len(closed) else closed
 
+    name = args.label or cfg.get("label") or ""
     hdr = [
-        f"# Paper log — {cfg['start']} to {date.today()}",
+        f"# Paper log{' - ' + name if name else ''} — {cfg['start']} to {date.today()}",
         "",
         f"- Rules: armed while the daily close is above EMA{cfg['ema_fast']} and "
         f"EMA{cfg['ema_slow']}; entry on the first 1h close above the previous "

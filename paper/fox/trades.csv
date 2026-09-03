@@ -1,0 +1,4 @@
+ticker,entry_time,entry,shares,notional,stop,scale_out,half_done,risk_pct,risk_eur,capped,reason,exit_time,exit,R,pnl,mark
+HBH.DE,2026-08-31 13:00:00,82.5,34,2805.0,81.3353,84.2471,False,1.41,39.6,True,stop,2026-09-02 11:00:00,82.5,0.0,0.0,82.5
+IOS.DE,2026-08-31 15:00:00,35.5,65,2307.5,34.6456,36.7816,False,2.41,55.53,False,stop,2026-09-01 10:00:00,34.6456,-1.0,-55.53,34.6456
+GFT.DE,2026-09-01 09:00:00,26.8,37,991.6,25.3172,29.0242,False,5.53,54.86,False,stop,2026-09-02 11:00:00,25.3172,-1.0,-54.86,25.3172

@@ -1,0 +1,26 @@
+{
+  "_comment": "The books run each morning. Each is fully independent: its own universe, priority ranking, config, equity curve, scan output and PDF. Adding a third means adding an entry here and nothing else.",
+
+  "_capital": "Each book carries the FULL account equity rather than a share of it, deliberately. The binding constraint is the stop, not the cash: positions are leveraged, so 6 slots in each book is 12 positions and about 4% of equity at risk when both are full, with notional up to roughly 200%. That is a leverage decision, taken knowingly - halve `equity` in both configs to run them as two halves of one account instead.",
+
+  "systems": [
+    {
+      "name": "index",
+      "label": "NQ100 + DAX40",
+      "watchlist": "watchlists/nq100_dax40.txt",
+      "dir": "paper/index",
+      "scans": "scans/index",
+      "trades_file": "results/trades_nq100_dax40.csv",
+      "scorecard": "results/scorecard_nq100_dax40.csv"
+    },
+    {
+      "name": "fox",
+      "label": "Fox list",
+      "watchlist": "watchlists/fox.txt",
+      "dir": "paper/fox",
+      "scans": "scans/fox",
+      "trades_file": "results/symbol_trades.csv",
+      "scorecard": "results/symbol_scorecard.csv"
+    }
+  ]
+}

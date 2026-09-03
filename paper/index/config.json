@@ -12,5 +12,6 @@
   "part_pct": 50,
   "min_risk_pct": 0.3,
   "max_position_pct": 16.67,
-  "priority_file": "paper/priority.csv"
+  "priority_file": "paper/index/priority.csv",
+  "label": "NQ100 + DAX40"
 }

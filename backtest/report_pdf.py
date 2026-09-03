@@ -80,7 +80,8 @@ def table_for(df: pd.DataFrame, style_extra=None) -> Table:
     return t
 
 
-def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None) -> Path:
+def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
+          label: str = "") -> Path:
     df = pd.read_csv(scan)
     for c in ("stale",):
         if c in df:
@@ -101,10 +102,14 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None) -> P
         str(out), pagesize=landscape(A4),
         leftMargin=12 * mm, rightMargin=12 * mm,
         topMargin=11 * mm, bottomMargin=11 * mm,
-        title=f"SuperTrend Breakout {asof}", author="supertrend_Stocks")
+        title=f"SuperTrend Breakout {label} {asof}".replace("  ", " "),
+        author="supertrend_Stocks")
 
     S = []
-    S.append(Paragraph("SuperTrend Breakout", H1))
+    # The book's name goes in the title, because two of these arrive each morning
+    # and a reader must be able to tell them apart at a glance.
+    S.append(Paragraph("SuperTrend Breakout"
+                       + (f" &mdash; {label}" if label else ""), H1))
     S.append(Paragraph(
         f"Session scanned <b>{asof}</b>  &nbsp;|&nbsp;  generated "
         f"{pd.Timestamp.now():%Y-%m-%d %H:%M}  &nbsp;|&nbsp;  {len(df)} symbols", SUB))
@@ -206,6 +211,10 @@ def main() -> int:
     ap.add_argument("--config", default="paper/config.json")
     ap.add_argument("--positions", default="paper/open_positions.csv")
     ap.add_argument("--outdir", default="reports")
+    ap.add_argument("--label", default="", help="book name, shown in the heading")
+    ap.add_argument("--prefix", default="supertrend",
+                    help="filename prefix, so two books do not overwrite "
+                         "each other's PDF")
     args = ap.parse_args()
 
     sd = Path(args.scans)
@@ -234,8 +243,8 @@ def main() -> int:
 
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
-    pdf = out / f"supertrend_{scan.stem}.pdf"
-    build(scan, pdf, cfg, pos)
+    pdf = out / f"{args.prefix}_{scan.stem}.pdf"
+    build(scan, pdf, cfg, pos, args.label)
     print(f"wrote {pdf}  ({pdf.stat().st_size/1024:.0f} KB)")
     return 0
 
