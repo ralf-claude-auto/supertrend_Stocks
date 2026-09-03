@@ -8,7 +8,9 @@
     "port": 4001,
     "client_id": 17,
     "daily_years": "3 Y",
-    "intraday_days": "30 D"
+    "intraday_days": "30 D",
+    "skip_current": true,
+    "_skip_current": "Phase 1 fetches only symbols whose cache does not already reach the last completed session. On a 05:30 run nothing does yet, so everything is fetched; on a re-run or after an interruption almost nothing is, which is what makes re-running the morning cheap instead of another 43 minutes."
   },
   "systems": [
     {

@@ -132,7 +132,10 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
         try:
             j = json.loads(st.read_text(encoding="utf-8"))
             when = str(j.get("when", ""))[:16].replace("T", " ")
-            if j.get("ok"):
+            # Warn on an unreachable gateway or a real fetch error. Unmapped
+            # symbols are permanently-delisted watchlist entries and would
+            # otherwise raise a warning every single day.
+            if j.get("ok") and not j.get("failed"):
                 S.append(Paragraph(
                     f"Data: <b>IBKR</b>, refreshed {when} "
                     f"({j.get('refreshed', '?')} symbols"

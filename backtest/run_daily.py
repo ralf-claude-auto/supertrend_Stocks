@@ -125,7 +125,9 @@ def main() -> int:
     # nothing is known about today until it has been computed.
     if refresh_on:
         ib("IB daily refresh",
-           ["--no-intraday"] + sum([["--watchlist", s["watchlist"]] for s in systems], []))
+           ["--no-intraday"]
+           + (["--skip-current"] if dr.get("skip_current") else [])
+           + sum([["--watchlist", s["watchlist"]] for s in systems], []))
 
     # PHASE 2 - scan, which is what tells us which symbols are actually armed.
     scanned = []

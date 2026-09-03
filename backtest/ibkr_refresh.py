@@ -212,7 +212,30 @@ def merge_into(path: Path, new: pd.DataFrame, index_name: str) -> tuple[pd.DataF
 
 
 def write_status(**kw) -> None:
-    kw["when"] = datetime.now().isoformat(timespec="seconds")
+    """Record how this pass went, accumulating within the same day.
+
+    The morning makes two passes - daily for everything, then hourly for what is
+    armed - and a plain overwrite would leave the report describing only the
+    second. So same-day passes are summed, and `ok` is true only if every pass
+    was: one failed leg has to be able to spoil the whole morning's claim, or the
+    warning it exists to raise never appears.
+    """
+    now = datetime.now()
+    kw["when"] = now.isoformat(timespec="seconds")
+    kw["passes"] = [kw.get("pass_kind", "?")]
+    try:
+        if STATUS.exists():
+            prev = json.loads(STATUS.read_text(encoding="utf-8"))
+            if str(prev.get("when", ""))[:10] == now.date().isoformat():
+                kw["refreshed"] = kw.get("refreshed", 0) + prev.get("refreshed", 0)
+                kw["failed"] = kw.get("failed", 0) + prev.get("failed", 0)
+                kw["unmapped"] = kw.get("unmapped", 0) + prev.get("unmapped", 0)
+                kw["ok"] = bool(kw.get("ok")) and bool(prev.get("ok", True))
+                kw["passes"] = prev.get("passes", []) + kw["passes"]
+                if not kw.get("reason") and prev.get("reason"):
+                    kw["reason"] = prev["reason"]
+    except Exception:  # noqa: BLE001
+        pass
     try:
         STATUS.parent.mkdir(parents=True, exist_ok=True)
         STATUS.write_text(json.dumps(kw, indent=1), encoding="utf-8")
@@ -319,7 +342,16 @@ def main() -> int:
               f"{cutoff.date()}, {len(tickers)} to fetch")
 
     if not tickers:
-        print("nothing to fetch")
+        # Still a healthy outcome, and it must say so: this is the normal result
+        # of --skip-current when the cache is already current, and leaving the
+        # status unwritten would make the report claim the data source is
+        # unknown when in fact everything needed is present.
+        print("nothing to fetch - cache already current")
+        write_status(ok=True, refreshed=0, unmapped=0, failed=0,
+                     pass_kind=("1h" if args.intraday_only else
+                                "daily" if args.no_intraday else "daily+1h")
+                               + " (already current)",
+                     note="cache already current, nothing to fetch")
         ib.disconnect()
         return 0
     per = 0 if args.intraday_only else 1
@@ -375,9 +407,20 @@ def main() -> int:
 
     ib.disconnect()
     mins = (time.time() - started) / 60
+    # `ok` means the gateway answered and this pass ran to the end - NOT that
+    # every symbol yielded bars. A permanently delisted ticker is unmappable
+    # forever, and letting that set ok=False would print a red data warning on
+    # every report every day until you stopped believing it. Real fetch errors
+    # are counted separately and do surface.
+    write_status(ok=True, refreshed=ok, unmapped=skipped, failed=failed,
+                 minutes=round(mins, 1), symbols=len(tickers),
+                 pass_kind="1h" if args.intraday_only else
+                           ("daily" if args.no_intraday else "daily+1h"))
     print(f"\ndone in {mins:.1f} min: {ok} refreshed, {skipped} unmapped, "
           f"{failed} failed")
-    return 0 if ok else 1
+    # Only a fetch that errored is a failure worth a non-zero exit. Unmappable
+    # symbols are a permanent property of the watchlist, not a fault of this run.
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
