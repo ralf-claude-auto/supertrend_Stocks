@@ -229,6 +229,36 @@ def main() -> int:
     df["shares"] = df.apply(size, axis=1)
     df["cost"] = (df.shares * df.trigger).round(0)
 
+    # A share count that rounds to zero is not a trade. It happens when the risk
+    # budget buys less than one share - a high-priced name with a wide stop, like
+    # MELI at 2,010 with a 59-point stop against 0.33% of 16,900. Listing it as a
+    # candidate is worse than omitting it: it reads as actionable every morning
+    # and never is. Marked and moved out of the tradeable list, with the reason,
+    # rather than silently dropped - the name is still armed, just not for this
+    # account size.
+    unsizeable = df.shares.notna() & (df.shares < 1)
+    df.loc[unsizeable, "note"] = "risk budget < 1 share"
+    df.loc[unsizeable, ["shares", "cost"]] = np.nan
+
+    # The priority rank the paper book uses to decide which of the day's
+    # candidates gets a slot. Shown because without it every armed name looks
+    # equally worth taking: CMCSA and NVDA sit side by side in the list, and
+    # nothing on the page says one is 117th of 134 on its own record while the
+    # other is near the top. A symbol ranked near the bottom will lose almost
+    # every slot contest, so seeing it here means "armed", not "take this".
+    # 1 is best. Unranked symbols have too little history to score.
+    df["rank"] = np.nan
+    pf = Path(cfg.get("priority_file") or "")
+    if pf.exists():
+        try:
+            pr = pd.read_csv(pf)
+            order = (pr.sort_values(pr.columns[1], ascending=False)
+                       .reset_index(drop=True))
+            rmap = {t: i + 1 for i, t in enumerate(order.iloc[:, 0])}
+            df["rank"] = df.ticker.map(rmap)
+        except Exception:  # noqa: BLE001
+            pass
+
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
     csv_path = out / f"{asof}.csv"
@@ -239,9 +269,11 @@ def main() -> int:
     # computed on older data, so a DISARM from one would be an instruction to
     # exit a position on evidence that does not exist yet.
     live = df[~df.stale]
-    new_arm = live[live.state == "NEW ARM"].sort_values("to_trigger_pct")
+    new_arm = live[live.state == "NEW ARM"].sort_values(
+        ["rank", "to_trigger_pct"], na_position="last")
     disarm = live[live.state == "DISARMED"].sort_values("ticker")
-    armed = live[live.state == "ARMED"].sort_values("to_trigger_pct")
+    armed = live[live.state == "ARMED"].sort_values(
+        ["rank", "to_trigger_pct"], na_position="last")
     behind = df[df.stale].sort_values(["session", "ticker"])
 
     print(f"\nsession scanned: {asof}   symbols: {len(df)}"
@@ -254,8 +286,8 @@ def main() -> int:
     if max_slots:
         print(f"  slots: {max_slots}, risk {risk_frac:.2%} of {equity:,.0f}")
 
-    cols = ["ticker", "close", "trigger", "to_trigger_pct", "stop", "risk_pct",
-            "shares", "cost", "to_disarm_pct", "note"]
+    cols = ["rank", "ticker", "close", "trigger", "to_trigger_pct", "stop",
+            "risk_pct", "shares", "cost", "to_disarm_pct", "note"]
     for label, part in (("DISARMED - EXIT", disarm), ("NEW ARM", new_arm),
                         ("ARMED, WAITING FOR BREAKOUT", armed),
                         ("STALE - data behind, no instruction", behind)):

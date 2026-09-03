@@ -39,16 +39,20 @@ BAND = colors.HexColor("#f3f4f6")
 RED = colors.HexColor("#b91c1c")
 GREEN = colors.HexColor("#15803d")
 
-COLS = [("ticker", "Symbol", 22), ("close", "Close", 20), ("trigger", "Trigger", 20),
-        ("to_trigger_pct", "To trig %", 20), ("stop", "Stop", 20),
-        ("risk_pct", "Risk %", 18), ("shares", "Shares", 18), ("cost", "Cost", 20),
-        ("to_disarm_pct", "Cushion %", 21), ("note", "Note", 26)]
+# "Rank" first, because it is the column that says whether a row is worth acting
+# on at all - 1 is the best record on the list, and a name near the bottom will
+# lose nearly every slot contest.
+COLS = [("rank", "Rank", 14), ("ticker", "Symbol", 20), ("close", "Close", 19),
+        ("trigger", "Trigger", 19), ("to_trigger_pct", "To trig %", 19),
+        ("stop", "Stop", 19), ("risk_pct", "Risk %", 17), ("shares", "Shares", 17),
+        ("cost", "Cost", 19), ("to_disarm_pct", "Cushion %", 20),
+        ("note", "Note", 24)]
 
 
 def fmt(v, col: str) -> str:
     if pd.isna(v):
         return "-"
-    if col in ("shares",):
+    if col in ("shares", "rank"):
         return f"{int(v):,}"
     if col in ("cost",):
         return f"{int(v):,}"
@@ -153,7 +157,9 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
             GREEN)
     section(f"Armed and waiting ({len(ready)})", ready,
             "Sorted by distance to the trigger. The trigger is yesterday's high and "
-            "it stands all day. Shares are sized on the indicative stop, which will "
+            "Ordered by rank, which is how the book allocates slots: rank 1 has the "
+            "best record on this universe. The trigger is yesterday's high and it "
+            "stands all day. Shares are sized on the indicative stop, which will "
             "have moved by the time a breakout actually fires.")
 
     if len(blocked) or len(behind):
