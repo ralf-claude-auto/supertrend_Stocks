@@ -123,6 +123,31 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
         "entry. Breakeven at 1R, half out at 1.5R, remainder on the breakeven stop "
         "until the gate disarms.", SUB))
 
+    # Where this morning's bars came from. A gateway that logged out overnight
+    # otherwise looks identical to a good day - same reports, same time, older
+    # numbers - so it is stated on the page rather than left in a log nobody
+    # reads.
+    st = Path("data_cache/ibkr_status.json")
+    if st.exists():
+        try:
+            j = json.loads(st.read_text(encoding="utf-8"))
+            when = str(j.get("when", ""))[:16].replace("T", " ")
+            if j.get("ok"):
+                S.append(Paragraph(
+                    f"Data: <b>IBKR</b>, refreshed {when} "
+                    f"({j.get('refreshed', '?')} symbols"
+                    + (f", {j['failed']} failed" if j.get("failed") else "")
+                    + ").", SUB))
+            else:
+                S.append(Paragraph(
+                    f"<b>DATA WARNING - {j.get('reason', 'refresh failed')} "
+                    f"at {when}.</b> These bars are from the last successful "
+                    f"refresh, not from this morning. Anything too old to trust "
+                    f"is listed as stale at the back and carries no instruction.",
+                    WARN))
+        except Exception:  # noqa: BLE001
+            pass
+
     eq = cfg.get("equity")
     if eq:
         S.append(Paragraph(
@@ -207,6 +232,7 @@ CELL = ParagraphStyle("CELL", parent=styles["Normal"], fontName="Helvetica",
                       fontSize=7.6, leading=9.5)
 CELL_H = ParagraphStyle("CELLH", parent=CELL, textColor=INK)
 MUTED_P = ParagraphStyle("MP", parent=SUB, fontSize=8.5, leading=11)
+WARN = ParagraphStyle("WARN", parent=SUB, fontSize=8.5, leading=11, textColor=RED)
 
 
 def main() -> int:

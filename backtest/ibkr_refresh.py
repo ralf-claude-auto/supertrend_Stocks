@@ -59,6 +59,10 @@ except Exception:  # noqa: BLE001
 from data import parse_watchlist
 
 CONTRACTS = Path("data_cache/ibkr_contracts.json")
+# Read by report_pdf so the morning PDF states where its bars came from. Without
+# it a gateway that quietly logged out overnight looks exactly like a good day:
+# the reports still arrive, on stale numbers, and nothing says so.
+STATUS = Path("data_cache/ibkr_status.json")
 DAILY_DIR = Path("data_cache")
 INTRA_DIR = Path("data_cache/intraday")
 
@@ -207,6 +211,15 @@ def merge_into(path: Path, new: pd.DataFrame, index_name: str) -> tuple[pd.DataF
     return merged, "merged"
 
 
+def write_status(**kw) -> None:
+    kw["when"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        STATUS.parent.mkdir(parents=True, exist_ok=True)
+        STATUS.write_text(json.dumps(kw, indent=1), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -242,6 +255,8 @@ def main() -> int:
     try:
         ib.connect(args.host, args.port, clientId=args.client_id, timeout=15)
     except Exception as exc:  # noqa: BLE001
+        write_status(ok=False, reason=f"gateway unreachable at "
+                                      f"{args.host}:{args.port}", refreshed=0)
         print(f"cannot reach IB Gateway at {args.host}:{args.port} ({exc})")
         print("  Is the gateway running and logged in, with the API enabled?")
         print("  Configure > Settings > API > Enable ActiveX and Socket Clients,")
