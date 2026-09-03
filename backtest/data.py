@@ -8,6 +8,7 @@ files using Yahoo Finance notation (AAPL, SAP.DE, ...).
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -83,6 +84,25 @@ def parse_watchlist(path: str | Path) -> list[str]:
     return out
 
 
+_IB_PROV: dict | None = None
+
+
+def _ib_written(ticker: str) -> bool:
+    """Did backtest/ibkr_refresh.py write this symbol's daily cache?
+
+    Read once per process. Absent file means no IB anywhere, and every caller
+    falls back to the ordinary Yahoo path unchanged.
+    """
+    global _IB_PROV
+    if _IB_PROV is None:
+        try:
+            _IB_PROV = json.loads(
+                Path("data_cache/ibkr_provenance.json").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            _IB_PROV = {}
+    return bool(_IB_PROV.get(ticker))
+
+
 def load_daily(ticker: str, start: str | None, end: str | None,
                cache_dir: str | Path = "data_cache",
                stale_after: pd.Timestamp | None = None) -> pd.DataFrame:
@@ -122,7 +142,14 @@ def load_daily(ticker: str, start: str | None, end: str | None,
         last = usable.index.max() if len(usable) else pd.NaT
         use_cache = pd.notna(last) and last >= stale_after
 
-    if use_cache and start is not None and meta_file.exists():
+    # A file IB wrote is AUTHORITATIVE and must never be replaced on range
+    # grounds. IB serves five years; the scan asks for 2021-01-01; the range test
+    # below therefore judged every IB file "too short" and refetched it from
+    # Yahoo - silently converting the whole cache back to adjusted prices after
+    # each conversion, which is why a 40-minute IB pass kept having no effect.
+    if use_cache and _ib_written(ticker):
+        pass
+    elif use_cache and start is not None and meta_file.exists():
         # Refetch when this file was built from a LATER start than we now need.
         # Compared on the requested start, not the first bar present, so a young
         # listing is not refetched forever just because it IPO'd late.
