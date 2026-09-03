@@ -36,6 +36,21 @@
 //    instead fills at the bar close, which on a fast bar is nowhere near the
 //    target and quietly understates every winner.
 //
+// WHAT THIS CHART IS NOT: the book. It models ONE symbol with unlimited capital
+// and takes every breakout the rules allow. The live system runs SIX SLOTS across
+// 136 symbols, ordered by paper/priority.csv, so a valid signal here is simply not
+// taken when the book is already full.
+//
+// That difference is not small and it is not a fault. DBK.DE on 2026-09-02 broke
+// out at 09:00 - the first 1h close, 35.126, above the previous daily high of
+// 34.745 - and this script marks an entry there. The book did not buy until 15:00
+// at 34.76, because all six slots were occupied until MUV2.DE stopped out at
+// exactly that hour. Both are right about the rules; only one of them is also
+// right about the capital.
+//
+// So read an entry marker here as "the rules fired", never as "the book bought".
+// scans/<book>/<date>.csv is what the book actually did.
+//
 // The Strategy Tester still will not match backtest/run_exits.py exactly: the
 // Python model checks the stop before the target within a bar and fills gaps at
 // the open, while Pine applies its own intrabar assumptions.
@@ -219,7 +234,7 @@ f_cell(table tb, int c, int r, string s, color col, bool right) =>
 
 var table live = table.new(position.top_right, 2, 12, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 60))
-var table card = table.new(position.bottom_right, 2, 14, border_width = 1,
+var table card = table.new(position.bottom_right, 2, 15, border_width = 1,
      frame_width = 1, frame_color = color.new(color.gray, 60))
 
 // islastconfirmedhistory as well as islast: with calc_on_every_tick off the
@@ -292,18 +307,20 @@ if barstate.islast or barstate.islastconfirmedhistory
              str.tostring(partialR, "#.#") + "R (limit)" : "off", dim, true)
         f_cell(card, 0, 8, "runner", key, false)
         f_cell(card, 1, 8, "breakeven stop until disarm", dim, true)
-        f_cell(card, 0, 9, "exit", key, false)
-        f_cell(card, 1, 9, "stop, or either EMA lost", dim, true)
-        f_cell(card, 0, 10, "commission", key, false)
-        f_cell(card, 1, 10, "0.1% per side", dim, true)
-        f_cell(card, 0, 11, "- results -", key, false)
-        f_cell(card, 1, 11, "", dim, true)
-        f_cell(card, 0, 12, "closed W / L", key, false)
-        f_cell(card, 1, 12, str.tostring(strategy.wintrades) + " / " +
+        f_cell(card, 0, 9, "portfolio", key, false)
+        f_cell(card, 1, 9, "NOT modelled - live book is 6 slots", no, true)
+        f_cell(card, 0, 10, "exit", key, false)
+        f_cell(card, 1, 10, "stop, or either EMA lost", dim, true)
+        f_cell(card, 0, 11, "commission", key, false)
+        f_cell(card, 1, 11, "0.1% per side", dim, true)
+        f_cell(card, 0, 12, "- results -", key, false)
+        f_cell(card, 1, 12, "", dim, true)
+        f_cell(card, 0, 13, "closed W / L", key, false)
+        f_cell(card, 1, 13, str.tostring(strategy.wintrades) + " / " +
              str.tostring(strategy.losstrades) + (closed > 0 ? "   " +
              str.tostring(100.0 * strategy.wintrades / closed, "#.#") + "%" : ""),
              strategy.wintrades >= strategy.losstrades ? ok : dim, true)
-        f_cell(card, 0, 13, "profit factor / net", key, false)
-        f_cell(card, 1, 13, (na(pf) ? "-" : str.tostring(pf, "#.##")) + "   " +
+        f_cell(card, 0, 14, "profit factor / net", key, false)
+        f_cell(card, 1, 14, (na(pf) ? "-" : str.tostring(pf, "#.##")) + "   " +
              f_sign(100 * strategy.netprofit / strategy.initial_capital, "#.#") + "%",
              strategy.netprofit >= 0 ? ok : no, true)

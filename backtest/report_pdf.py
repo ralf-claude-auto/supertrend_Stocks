@@ -101,6 +101,7 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
     # are listed after, with the reason, rather than silently dropped.
     ready = armed[armed.shares.notna()]
     blocked = armed[armed.shares.isna()]
+    holding = live[live.state == "HELD"].sort_values("ticker")         if "state" in live else live.iloc[0:0]
 
     doc = SimpleDocTemplate(
         str(out), pagesize=landscape(A4),
@@ -161,7 +162,8 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
     S.append(Spacer(1, 5 * mm))
 
     counts = (f"<b>{len(disarm)}</b> to exit &nbsp;&nbsp; <b>{len(new_arm)}</b> newly "
-              f"armed &nbsp;&nbsp; <b>{len(ready)}</b> watching &nbsp;&nbsp; "
+              f"armed &nbsp;&nbsp; <b>{len(holding)}</b> held &nbsp;&nbsp; "
+              f"<b>{len(ready)}</b> watching &nbsp;&nbsp; "
               f"<b>{len(blocked) + len(behind)}</b> not actionable")
     S.append(Paragraph(counts, BIG))
     S.append(Spacer(1, 4 * mm))
@@ -183,6 +185,10 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
     section(f"Newly armed today ({len(new_arm)})", new_arm,
             "Cleared both averages on the session just closed. In play from today.",
             GREEN)
+    section(f"Already held - do not re-enter ({len(holding)})", holding,
+            "These are open in the book. They are still armed, and today's "
+            "trigger is shown, but the position exists - so the row is a status, "
+            "not an instruction to buy.")
     section(f"Armed and waiting ({len(ready)})", ready,
             "Sorted by distance to the trigger. The trigger is yesterday's high and "
             "Ordered by rank, which is how the book allocates slots: rank 1 has the "

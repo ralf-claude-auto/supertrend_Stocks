@@ -161,6 +161,10 @@ def main() -> int:
                     help="skip entries whose stop is nearer than this %% of price")
     ap.add_argument("--config", default="paper/config.json",
                     help="equity and risk, for the position-size column")
+    ap.add_argument("--positions", default=None,
+                    help="this book's open_positions.csv, so a name already held "
+                         "is not listed again as a fresh candidate. Defaults to "
+                         "the file sitting beside --config")
     ap.add_argument("--cache-dir", default="data_cache")
     ap.add_argument("--intraday-dir", default="data_cache/intraday")
     ap.add_argument("--outdir", default="scans")
@@ -259,6 +263,31 @@ def main() -> int:
         except Exception:  # noqa: BLE001
             pass
 
+    # Names already in the book. DBK.DE showed why this matters: it broke out on
+    # 09-02, the book bought it at 15:00, and the next morning's scan listed it
+    # under "armed, waiting for breakout" with a fresh share count - identical to
+    # a name you own nothing of. Both statements were true (35.38 really is
+    # today's trigger) and together they read as "buy this", which is how you end
+    # up holding it twice. The scan had no idea the book existed.
+    #
+    # The file is written by paper_log AFTER this runs, so it is yesterday's -
+    # which is exactly right: it is what you are holding when you read the report.
+    pos_path = Path(args.positions) if args.positions else cp.parent / "open_positions.csv"
+    held: set[str] = set()
+    if pos_path.exists():
+        try:
+            held = set(pd.read_csv(pos_path).ticker.astype(str))
+        except Exception:  # noqa: BLE001
+            held = set()
+    df["held"] = df.ticker.isin(held)
+    # A held name keeps its real gate state in the CSV but is routed to its own
+    # section, so it can never be read as something to open.
+    df.loc[df.held & (df.state == "ARMED"), "state"] = "HELD"
+
+    # Written only once every column exists. This used to be written before the
+    # held/HELD columns were computed, so report_pdf - which renders from this
+    # file, not from memory - never saw them and kept listing open positions as
+    # fresh candidates even after the console output stopped doing so.
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
     csv_path = out / f"{asof}.csv"
@@ -274,6 +303,7 @@ def main() -> int:
     disarm = live[live.state == "DISARMED"].sort_values("ticker")
     armed = live[live.state == "ARMED"].sort_values(
         ["rank", "to_trigger_pct"], na_position="last")
+    holding = live[live.state == "HELD"].sort_values("ticker")
     behind = df[df.stale].sort_values(["session", "ticker"])
 
     print(f"\nsession scanned: {asof}   symbols: {len(df)}"
@@ -281,6 +311,8 @@ def main() -> int:
     print(f"  DISARMED today (exit any open position): {len(disarm)}")
     print(f"  NEW ARM today:                           {len(new_arm)}")
     print(f"  already armed and waiting:               {len(armed)}")
+    if len(holding):
+        print(f"  already HELD (do not re-enter):          {len(holding)}")
     if len(behind):
         print(f"  STALE, not actionable:                   {len(behind)}")
     if max_slots:
@@ -290,6 +322,7 @@ def main() -> int:
             "risk_pct", "shares", "cost", "to_disarm_pct", "note"]
     for label, part in (("DISARMED - EXIT", disarm), ("NEW ARM", new_arm),
                         ("ARMED, WAITING FOR BREAKOUT", armed),
+                        ("ALREADY HELD - do not re-enter", holding),
                         ("STALE - data behind, no instruction", behind)):
         if part.empty:
             continue
@@ -304,6 +337,7 @@ def main() -> int:
                 f"Stop: 1h SuperTrend({args.h_factor:g}, ATR{args.h_atr}) at entry.\n\n")
         for label, part in (("Disarmed - exit", disarm), ("New arm", new_arm),
                             ("Armed, waiting", armed),
+                            ("Already held - do not re-enter", holding),
                             ("Stale - data behind, no instruction", behind)):
             f.write(f"\n## {label} ({len(part)})\n\n")
             f.write("none\n" if part.empty
