@@ -55,6 +55,8 @@ def main() -> int:
     ap.add_argument("--systems", default="paper/systems.json")
     ap.add_argument("--only", default=None, help="run just this system by name")
     ap.add_argument("--no-send", action="store_true", help="build but do not send")
+    ap.add_argument("--no-refresh", action="store_true",
+                    help="skip the IB data refresh and use the cache as it is")
     ap.add_argument("--status", action="store_true",
                     help="pass through to paper_log: do not refresh data")
     args = ap.parse_args()
@@ -70,6 +72,26 @@ def main() -> int:
           f"{len(systems)} system(s): {', '.join(s['name'] for s in systems)} =====")
 
     failed = []
+
+    # Refresh the price cache from IB first, once for the union of every
+    # watchlist, so both books see the same bars. Deliberately NOT fatal: if the
+    # gateway is down the books still run against whatever is cached, and the
+    # staleness guard keeps anything too old out of the actionable lists. A
+    # missing gateway should degrade the data, not cancel the morning.
+    dr = spec.get("data_refresh", {})
+    if dr.get("enabled") and not args.no_refresh:
+        cmd = ["backtest/ibkr_refresh.py",
+               "--host", str(dr.get("host", "127.0.0.1")),
+               "--port", str(dr.get("port", 4001)),
+               "--client-id", str(dr.get("client_id", 17)),
+               "--daily-years", dr.get("daily_years", "3 Y"),
+               "--intraday-days", dr.get("intraday_days", "30 D")]
+        for s in systems:
+            cmd += ["--watchlist", s["watchlist"]]
+        if not run("IB data refresh", cmd):
+            print("[WARN] IB refresh failed - continuing on the existing cache",
+                  flush=True)
+            failed.append("ibkr_refresh")
     for s in systems:
         name, d = s["name"], s["dir"]
         print(f"\n=========== {name}  ({s['label']}) ===========", flush=True)

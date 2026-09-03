@@ -1,8 +1,15 @@
 {
   "_comment": "The books run each morning. Each is fully independent: its own universe, priority ranking, config, equity curve, scan output and PDF. Adding a third means adding an entry here and nothing else.",
-
   "_capital": "Each book carries the FULL account equity rather than a share of it, deliberately. The binding constraint is the stop, not the cash: positions are leveraged, so 6 slots in each book is 12 positions and about 4% of equity at risk when both are full, with notional up to roughly 200%. That is a leverage decision, taken knowingly - halve `equity` in both configs to run them as two halves of one account instead.",
-
+  "data_refresh": {
+    "_comment": "Fills the price cache from IB Gateway before the books run, writing the same files the Yahoo loaders read. Failure is NOT fatal: the pipeline carries on against the existing cache, because a missing gateway should degrade the data, not cancel the morning. Set enabled false to go back to Yahoo only.",
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 4001,
+    "client_id": 17,
+    "daily_years": "3 Y",
+    "intraday_days": "30 D"
+  },
   "systems": [
     {
       "name": "index",
