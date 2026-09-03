@@ -223,6 +223,11 @@ def main() -> int:
                     help="short by design: it is merged onto the existing history, "
                          "and a shorter window is one cheap request per symbol")
     ap.add_argument("--no-intraday", action="store_true")
+    ap.add_argument("--skip-current", action="store_true",
+                    help="skip symbols whose cache already reaches the last "
+                         "completed session. Makes a re-run, or a resumed run "
+                         "after an interruption, cost almost nothing - which "
+                         "matters because a full pass is ~470 paced requests")
     ap.add_argument("--check", action="store_true", help="connect, report, exit")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -271,9 +276,38 @@ def main() -> int:
     ok = skipped = failed = 0
     started = time.time()
 
+    # The last session that must be present for a cache to count as current.
+    # Compared on the last USABLE bar for the same reason load_daily does it: a
+    # row can exist with all-NaN prices and be dropped by every reader.
+    cutoff = (pd.Timestamp.now().normalize() - pd.tseries.offsets.BDay(1))
+
+    def is_current(t: str) -> bool:
+        safe = t.replace("/", "_").replace("^", "_")
+        f = DAILY_DIR / f"{safe}.csv"
+        if not f.exists():
+            return False
+        try:
+            df = pd.read_csv(f, index_col=0, parse_dates=True)
+            df = df.dropna(subset=["High", "Low", "Close"])
+            return len(df) > 0 and df.index.max() >= cutoff
+        except Exception:  # noqa: BLE001
+            return False
+
+    if args.skip_current:
+        before = len(tickers)
+        tickers = [t for t in tickers if not is_current(t)]
+        print(f"--skip-current: {before - len(tickers)} already reach "
+              f"{cutoff.date()}, {len(tickers)} to fetch")
+
+    if not tickers:
+        print("nothing to fetch")
+        ib.disconnect()
+        return 0
+    est = len(tickers) * (1 if args.no_intraday else 2) / 55 * 10
     print(f"refreshing {len(tickers)} symbols "
           f"(daily {args.daily_years}"
-          f"{'' if args.no_intraday else f' + 1h {args.intraday_days}'})")
+          f"{'' if args.no_intraday else f' + 1h {args.intraday_days}'})"
+          f" - roughly {est:.0f} min at IB's pacing limit")
     for i, t in enumerate(tickers, 1):
         contract = resolve(ib, t, cache, args.verbose)
         if contract is None:
