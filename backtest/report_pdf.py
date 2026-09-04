@@ -24,6 +24,9 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).parent))
+from data import tv_symbol
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4, landscape
@@ -38,6 +41,21 @@ RULE = colors.HexColor("#d1d5db")
 BAND = colors.HexColor("#f3f4f6")
 RED = colors.HexColor("#b91c1c")
 GREEN = colors.HexColor("#15803d")
+LINK = colors.HexColor("#1d4ed8")
+
+# Set from --tv-chart. Every symbol cell becomes a link to this chart with the
+# symbol appended, so a name in the report opens the chart you actually analyse
+# in rather than a default one.
+TV_BASE = ""
+
+
+def sym_cell(ticker: str) -> str:
+    """A ticker, linked to its TradingView chart when a base URL is configured."""
+    if not TV_BASE:
+        return str(ticker)
+    sep = "&" if "?" in TV_BASE else "?"
+    return (f'<a href="{TV_BASE}{sep}symbol={tv_symbol(str(ticker))}" '
+            f'color="#1d4ed8">{ticker}</a>')
 
 # "Rank" first, because it is the column that says whether a row is worth acting
 # on at all - 1 is the best record on the list, and a name near the bottom will
@@ -65,8 +83,8 @@ def fmt(v, col: str) -> str:
 
 def table_for(df: pd.DataFrame, style_extra=None) -> Table:
     head = [Paragraph(f"<b>{lbl}</b>", CELL_H) for _, lbl, _ in COLS]
-    body = [[Paragraph(fmt(r[c], c), CELL) for c, _, _ in COLS]
-            for _, r in df.iterrows()]
+    body = [[Paragraph(sym_cell(r[c]) if c == "ticker" else fmt(r[c], c), CELL)
+             for c, _, _ in COLS] for _, r in df.iterrows()]
     t = Table([head] + body, colWidths=[w * mm for _, _, w in COLS],
               repeatRows=1, hAlign="LEFT")
     st = [
@@ -91,6 +109,10 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
         if c in df:
             df[c] = df[c].astype(bool)
     asof = df.session.mode().iat[0]
+
+    # Rank is carried on the scan rows; the positions file has no notion of it,
+    # so it is looked up here rather than duplicated into the book.
+    ranks = dict(zip(df.ticker, df["rank"])) if "rank" in df else {}
 
     live = df[~df.stale] if "stale" in df else df
     behind = df[df.stale] if "stale" in df else df.iloc[0:0]
@@ -210,17 +232,58 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
                 "computed on older data, so no instruction is issued for them.")
 
     if positions is not None and not positions.empty:
-        S.append(Paragraph("Open paper positions", H2))
-        cols = [c for c in positions.columns][:9]
-        head = [Paragraph(f"<b>{c}</b>", CELL_H) for c in cols]
-        body = [[Paragraph(str(r[c]), CELL) for c in cols]
-                for _, r in positions.iterrows()]
-        t = Table([head] + body, repeatRows=1, hAlign="LEFT")
+        # An explicit column list, not the first N of whatever the CSV happens to
+        # hold. Slicing columns put mark, R and pnl - the three that say how the
+        # position is actually doing - just past the cut, so the table showed
+        # entry and stop and nothing about the outcome.
+        p = positions.copy()
+        p["rank"] = p.ticker.map(ranks)
+        p["pnl_pct"] = (100.0 * p.pnl / p.notional).round(2) if "notional" in p else None
+        p = p.sort_values(["rank", "ticker"], na_position="last")
+
+        POS = [("rank", "Rank", 13), ("ticker", "Symbol", 20),
+               ("entry_time", "Entered", 26), ("entry", "Entry", 19),
+               ("shares", "Shares", 16), ("mark", "Price", 19),
+               ("stop", "Stop", 19), ("scale_out", "Scale out", 20),
+               ("R", "R", 14), ("pnl", "Open P/L", 18), ("pnl_pct", "P/L %", 17)]
+
+        def posfmt(v, col):
+            if pd.isna(v):
+                return "-"
+            if col == "entry_time":
+                return str(v)[:16]
+            if col in ("rank", "shares"):
+                return f"{int(v):,}"
+            if col in ("R", "pnl", "pnl_pct"):
+                return f"{v:+,.2f}"
+            if isinstance(v, float):
+                return f"{v:,.2f}"
+            return str(v)
+
+        S.append(Paragraph(f"Open paper positions ({len(p)})", H2))
+        S.append(Paragraph(
+            "Price is the latest mark, so P/L is what the position is worth now. "
+            "Rank is the same one the watch list uses - it decided which of the "
+            "day's candidates got this slot.", SUB))
+        head = [Paragraph(f"<b>{lbl}</b>", CELL_H) for _, lbl, _ in POS]
+        body = [[Paragraph(sym_cell(r[c]) if c == "ticker" else posfmt(r[c], c),
+                           CELL) for c, _, _ in POS]
+                for _, r in p.iterrows()]
+        # Total row: the number you actually want off this table.
+        tot = p.pnl.sum() if "pnl" in p else 0.0
+        body.append([Paragraph("", CELL)] * 9
+                    + [Paragraph(f"<b>{tot:+,.2f}</b>", CELL_H),
+                       Paragraph("", CELL)])
+        t = Table([head] + body, colWidths=[w * mm for _, _, w in POS],
+                  repeatRows=1, hAlign="LEFT")
         t.setStyle(TableStyle([
             ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BAND]),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -2), [colors.white, BAND]),
+            ("LINEABOVE", (0, -1), (-1, -1), 0.6, INK),
+            ("TEXTCOLOR", (9, 1), (9, -1), GREEN if tot >= 0 else RED),
             ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
         S.append(t)
 
     doc.build(S)
@@ -253,6 +316,11 @@ def main() -> int:
     ap.add_argument("--positions", default="paper/open_positions.csv")
     ap.add_argument("--outdir", default="reports")
     ap.add_argument("--label", default="", help="book name, shown in the heading")
+    ap.add_argument("--tv-chart", default="",
+                    help="TradingView chart URL to link symbols to, e.g. "
+                         "https://www.tradingview.com/chart/AbCd1234/ - the slug "
+                         "of the layout you analyse in. Without it the symbols "
+                         "are plain text")
     ap.add_argument("--prefix", default="supertrend",
                     help="filename prefix, so two books do not overwrite "
                          "each other's PDF")
@@ -281,6 +349,9 @@ def main() -> int:
             pos = pd.read_csv(pp)
         except Exception:  # noqa: BLE001
             pos = None
+
+    global TV_BASE
+    TV_BASE = args.tv_chart.strip()
 
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)

@@ -33,5 +33,7 @@
       "trades_file": "results/symbol_trades.csv",
       "scorecard": "results/symbol_scorecard.csv"
     }
-  ]
+  ],
+  "tv_chart": "https://www.tradingview.com/chart/",
+  "_tv_chart": "Symbols in the reports link here with ?symbol= appended. Put the slug of your !AKTIEN_ANALYSE layout in it - open that layout in TradingView and copy the URL, which looks like https://www.tradingview.com/chart/AbCd1234/. Without a slug this opens whichever layout you used last, which is usually right but not guaranteed."
 }

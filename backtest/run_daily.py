@@ -203,7 +203,7 @@ def main() -> int:
             "--positions", f"{d}/open_positions.csv",
             "--label", s["label"],
             "--prefix", name,
-        ]):
+        ] + (["--tv-chart", spec["tv_chart"]] if spec.get("tv_chart") else [])):
             failed.append(f"{name}:pdf")
             continue
 

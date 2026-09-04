@@ -84,6 +84,33 @@ def parse_watchlist(path: str | Path) -> list[str]:
     return out
 
 
+# Yahoo suffix -> TradingView exchange prefix. The inverse of _EXCHANGE_SUFFIX
+# above, kept beside it so the two cannot drift apart. Used to turn a report row
+# into a chart link.
+_TV_PREFIX = {
+    ".DE": "XETR", ".F": "FWB", ".SG": "SWB", ".HM": "HAM", ".DU": "DUS",
+    ".MU": "MUN", ".BE": "BER", ".AS": "EURONEXT", ".PA": "EURONEXT",
+    ".BR": "EURONEXT", ".LS": "EURONEXT", ".MI": "MIL", ".L": "LSE",
+    ".SW": "SIX", ".VI": "VIE", ".CO": "OMXCOP", ".ST": "OMXSTO",
+    ".HE": "OMXHEX", ".OL": "OSL", ".MC": "BME",
+}
+
+
+def tv_symbol(ticker: str) -> str:
+    """A Yahoo-style ticker as TradingView writes it.
+
+    German listings need the exchange or TradingView may resolve them to a
+    different venue - XETR:HBH is not the same series as TRADEGATE:HBH, and the
+    gate is computed on the XETRA one. US tickers are left bare, which
+    TradingView resolves to the primary listing.
+    """
+    t = ticker.upper()
+    for suf, pre in _TV_PREFIX.items():
+        if t.endswith(suf):
+            return f"{pre}:{t[: -len(suf)]}"
+    return t
+
+
 _IB_PROV: dict | None = None
 
 
