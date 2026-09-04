@@ -129,7 +129,21 @@ def load_daily(ticker: str, start: str | None, end: str | None,
         except Exception:  # noqa: BLE001 - unreadable cache: refetch
             cached, use_cache = None, False
 
-    if use_cache and stale_after is not None:
+    # A file IB wrote is never replaced by Yahoo - not for being short, and not
+    # for being stale either. Staleness is a SEPARATE trigger from the range
+    # check, and closing only the range one left this hole: with the gateway down
+    # on 2026-09-04, IB's newest US bar was 09-02, the scan wanted 09-03, and 166
+    # of 228 symbols were quietly refetched from Yahoo - putting adjusted prices
+    # back under a system that had just been converted to raw ones.
+    #
+    # Old data of the right convention beats fresh data of the wrong one. Held
+    # back, the symbol simply reports its true last session and scan_daily's own
+    # staleness guard keeps it out of the actionable lists, so the failure is
+    # visible and issues no instruction. Refetched, it would silently produce a
+    # confident instruction computed on a different price series.
+    ib_authoritative = use_cache and _ib_written(ticker)
+
+    if use_cache and stale_after is not None and not ib_authoritative:
         # A daily scan must not keep reporting last week.
         #
         # Compared on the last USABLE bar, not on the raw index. Yahoo sometimes
@@ -147,7 +161,7 @@ def load_daily(ticker: str, start: str | None, end: str | None,
     # below therefore judged every IB file "too short" and refetched it from
     # Yahoo - silently converting the whole cache back to adjusted prices after
     # each conversion, which is why a 40-minute IB pass kept having no effect.
-    if use_cache and _ib_written(ticker):
+    if ib_authoritative:
         pass
     elif use_cache and start is not None and meta_file.exists():
         # Refetch when this file was built from a LATER start than we now need.
