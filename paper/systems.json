@@ -34,6 +34,6 @@
       "scorecard": "results/symbol_scorecard.csv"
     }
   ],
-  "tv_chart": "https://www.tradingview.com/chart/",
-  "_tv_chart": "Symbols in the reports link here with ?symbol= appended. Put the slug of your !AKTIEN_ANALYSE layout in it - open that layout in TradingView and copy the URL, which looks like https://www.tradingview.com/chart/AbCd1234/. Without a slug this opens whichever layout you used last, which is usually right but not guaranteed."
+  "tv_chart": "https://www.tradingview.com/chart/cIoPFaC1/",
+  "_tv_chart": "Symbols in the reports link here with ?symbol= appended, so a name opens the !AKTIEN_ANALYSE layout already on that symbol. These are https links and open in the default browser. Deep-linking into TradingView DESKTOP is not possible as installed: the Store package (TradingView.Desktop_3.4.0.8149) declares no windows.protocol extension, and the stray HKCU\\Software\\Classes\tradingview key has URL Protocol set but no shell\\open\\command, so a tradingview:// link would go nowhere."
 }
