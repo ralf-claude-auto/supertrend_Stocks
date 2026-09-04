@@ -103,7 +103,7 @@ def table_for(df: pd.DataFrame, style_extra=None) -> Table:
 
 
 def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
-          label: str = "") -> Path:
+          label: str = "", trades: pd.DataFrame | None = None) -> Path:
     df = pd.read_csv(scan)
     for c in ("stale",):
         if c in df:
@@ -286,6 +286,93 @@ def build(scan: Path, out: Path, cfg: dict, positions: pd.DataFrame | None,
             ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
         S.append(t)
 
+    # ---------------------------------------------------------------- closed
+    # The realised record, and the only place the book's actual result shows.
+    # Open positions say what MIGHT happen; this says what did. Kept in
+    # chronological order with a running total, because the question it answers
+    # is "how has this book gone since it started", not "what happened today" -
+    # newest-first would break the cumulative column into nonsense.
+    if trades is not None and not trades.empty:
+        tr = trades.copy()
+        for c in ("entry_time", "exit_time"):
+            tr[c] = pd.to_datetime(tr[c], errors="coerce")
+        tr = tr.sort_values("exit_time")
+        tr["cum"] = tr.pnl.cumsum()
+        tr["held"] = (tr.exit_time - tr.entry_time).dt.total_seconds() / 86400.0
+
+        realised = float(tr.pnl.sum())
+        wins = int((tr.R > 0).sum())
+        unreal = float(positions.pnl.sum()) if positions is not None and \
+            not positions.empty and "pnl" in positions else 0.0
+
+        S.append(Spacer(1, 6 * mm))
+        S.append(Paragraph(f"Closed trades ({len(tr)})", H2))
+        S.append(Paragraph(
+            f"Realised <b>{realised:+,.2f}</b> over {len(tr)} trades, "
+            f"{wins} won ({100.0*wins/len(tr):.0f}%), total "
+            f"<b>{tr.R.sum():+.2f}R</b>, best {tr.R.max():+.2f}R, "
+            f"worst {tr.R.min():+.2f}R. &nbsp; With open positions at "
+            f"{unreal:+,.2f}, the book stands at "
+            f"<b>{realised + unreal:+,.2f}</b>.", SUB))
+
+        TRD = [("ticker", "Symbol", 20), ("entry_time", "Entered", 25),
+               ("exit_time", "Exited", 25), ("held", "Days", 13),
+               ("reason", "Exit", 17), ("entry", "Entry", 18),
+               ("exit", "Exit px", 18), ("shares", "Shares", 15),
+               ("R", "R", 13), ("pnl", "P/L", 17), ("cum", "Cumulative", 21)]
+
+        def trfmt(v, col):
+            if pd.isna(v):
+                return "-"
+            if col in ("entry_time", "exit_time"):
+                return f"{v:%m-%d %H:%M}"
+            if col == "held":
+                return f"{v:.1f}"
+            if col == "shares":
+                return f"{int(v):,}"
+            if col in ("R", "pnl", "cum"):
+                return f"{v:+,.2f}"
+            if isinstance(v, float):
+                return f"{v:,.2f}"
+            return str(v)
+
+        head = [Paragraph(f"<b>{lbl}</b>", CELL_H) for _, lbl, _ in TRD]
+        body = [[Paragraph(sym_cell(r[c]) if c == "ticker" else trfmt(r[c], c), CELL)
+                 for c, _, _ in TRD] for _, r in tr.iterrows()]
+        t = Table([head] + body, colWidths=[w * mm for _, _, w in TRD],
+                  repeatRows=1, hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BAND]),
+            ("TEXTCOLOR", (9, 1), (10, -1), GREEN if realised >= 0 else RED),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
+        S.append(t)
+
+        # Per symbol, which is the question the ledger cannot answer at a glance:
+        # not "how did that trade go" but "is this name worth its slot at all".
+        g = tr.groupby("ticker").agg(trades=("R", "size"), won=("R", lambda s: int((s > 0).sum())),
+                                     R=("R", "sum"), pnl=("pnl", "sum")).reset_index()
+        g = g.sort_values("pnl")
+        S.append(Spacer(1, 4 * mm))
+        S.append(Paragraph(f"Realised by symbol ({len(g)})", H2))
+        SYM = [("ticker", "Symbol", 24), ("trades", "Trades", 18),
+               ("won", "Won", 15), ("R", "R", 16), ("pnl", "P/L", 20)]
+        head = [Paragraph(f"<b>{lbl}</b>", CELL_H) for _, lbl, _ in SYM]
+        body = [[Paragraph(sym_cell(r[c]) if c == "ticker"
+                           else (f"{r[c]:+,.2f}" if c in ("R", "pnl") else f"{int(r[c])}"),
+                           CELL) for c, _, _ in SYM] for _, r in g.iterrows()]
+        t = Table([head] + body, colWidths=[w * mm for _, _, w in SYM],
+                  repeatRows=1, hAlign="LEFT")
+        t.setStyle(TableStyle([
+            ("LINEBELOW", (0, 0), (-1, 0), 0.6, INK),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, BAND]),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4)]))
+        S.append(t)
+
     doc.build(S)
     return out
 
@@ -314,6 +401,9 @@ def main() -> int:
     ap.add_argument("--scans", default="scans")
     ap.add_argument("--config", default="paper/config.json")
     ap.add_argument("--positions", default="paper/open_positions.csv")
+    ap.add_argument("--trades", default=None,
+                    help="this book's trades.csv, for the realised P/L ledger. "
+                         "Defaults to the file beside --positions")
     ap.add_argument("--outdir", default="reports")
     ap.add_argument("--label", default="", help="book name, shown in the heading")
     ap.add_argument("--tv-chart", default="",
@@ -349,6 +439,13 @@ def main() -> int:
             pos = pd.read_csv(pp)
         except Exception:  # noqa: BLE001
             pos = None
+    trd = None
+    tp = Path(args.trades) if args.trades else pp.parent / "trades.csv"
+    if tp.exists():
+        try:
+            trd = pd.read_csv(tp)
+        except Exception:  # noqa: BLE001
+            trd = None
 
     global TV_BASE
     TV_BASE = args.tv_chart.strip()
@@ -356,7 +453,7 @@ def main() -> int:
     out = Path(args.outdir)
     out.mkdir(parents=True, exist_ok=True)
     pdf = out / f"{args.prefix}_{scan.stem}.pdf"
-    build(scan, pdf, cfg, pos, args.label)
+    build(scan, pdf, cfg, pos, args.label, trd)
     print(f"wrote {pdf}  ({pdf.stat().st_size/1024:.0f} KB)")
     return 0
 

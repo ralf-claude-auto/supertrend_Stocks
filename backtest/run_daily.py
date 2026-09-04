@@ -201,6 +201,7 @@ def main() -> int:
             "--scans", s["scans"],
             "--config", f"{d}/config.json",
             "--positions", f"{d}/open_positions.csv",
+            "--trades", f"{d}/trades.csv",
             "--label", s["label"],
             "--prefix", name,
         ] + (["--tv-chart", spec["tv_chart"]] if spec.get("tv_chart") else [])):
