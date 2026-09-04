@@ -108,6 +108,16 @@ def main() -> int:
     dr = spec.get("data_refresh", {})
     refresh_on = dr.get("enabled") and not args.no_refresh
 
+    # The status file describes THIS run, so clear it before the passes write to
+    # it. Accumulating within a run is right - a failed daily leg must spoil the
+    # claim made by a later successful hourly one. Accumulating across the DAY is
+    # not: the gateway was down at 08:03, came back, the conversion succeeded and
+    # verify passed 228/228, and the reports still carried a red warning saying
+    # the data was stale. It was not. A warning that survives its own cause is
+    # the same crying-wolf failure as one that fires on delisted tickers.
+    if refresh_on:
+        (ROOT / "data_cache/ibkr_status.json").unlink(missing_ok=True)
+
     def ib(step: str, extra: list[str]) -> bool:
         cmd = ["backtest/ibkr_refresh.py",
                "--host", str(dr.get("host", "127.0.0.1")),
